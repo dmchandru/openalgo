@@ -184,6 +184,15 @@ reconciliation and the failed-exit-stays-open rule.
 
 ## Deployment
 
+**The recommended target is a single EC2 instance with an Elastic IP, installed
+with `install/install.sh` — not Elastic Beanstalk.** The reasoning, the build
+sheet and the fork-specific install and upgrade steps are in
+[`DEPLOYMENT.md`](DEPLOYMENT.md). Read it before changing anything about how
+the app is started or where its data lives.
+
+The Elastic Beanstalk notes below remain because the Procfile and the
+`requirements.txt` additions exist for it and are still correct.
+
 Elastic Beanstalk, single instance, following
 [the upstream guide](https://docs.openalgo.in/installation-guidelines/getting-started/amazon-elastic-beanstalk).
 
