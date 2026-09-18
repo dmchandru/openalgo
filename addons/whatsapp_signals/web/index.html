@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WhatsApp Signals - OpenAlgo</title>
+<link rel="stylesheet" href="/whatsapp-signals/assets/style.css">
+</head>
+<body>
+<header class="bar">
+  <div class="bar-left">
+    <a class="back" href="/dashboard">&larr; OpenAlgo</a>
+    <h1>WhatsApp Signals</h1>
+  </div>
+  <div class="bar-right" id="status-strip"></div>
+</header>
+
+<main>
+  <section class="panel" id="banner-slot"></section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Groups</h2>
+      <p class="hint">Every group this linked device sees appears here. A group
+        trades nothing until you enable it.</p>
+    </div>
+    <div id="groups"></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Open positions</h2>
+      <p class="hint">Opened from a signal. Stops are watched on live ticks by
+        the platform risk monitor.</p>
+    </div>
+    <div id="positions"></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Test a message</h2>
+      <p class="hint">Paste anything your group posts and see what it would do.
+        Nothing is sent.</p>
+    </div>
+    <div class="tester">
+      <textarea id="test-text" rows="3" placeholder="BUY NIFTY 25000 CE @ 120 SL 100 TGT 150"></textarea>
+      <div class="tester-controls">
+        <label class="check"><input type="checkbox" id="test-llm"> Also try the model</label>
+        <button class="btn" id="test-run">Test</button>
+      </div>
+    </div>
+    <div id="test-result"></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Signal log</h2>
+      <p class="hint">Every message considered from an enabled group, and what
+        came of it.</p>
+    </div>
+    <div id="events"></div>
+  </section>
+</main>
+
+<script src="/whatsapp-signals/assets/app.js"></script>
+</body>
+</html>

@@ -345,6 +345,12 @@ def create_app():
     app.register_blueprint(strategy_portfolio_bp)  # Register Strategy Portfolio blueprint
     app.register_blueprint(postback_bp)  # Register broker postback (order-update webhook) blueprint
 
+    # Local add-ons (this deployment's own code, kept out of upstream files so
+    # an upstream pull cannot conflict with it). See addons/README.md.
+    from addons import install_addons
+
+    install_addons(app)
+
     # Remote MCP (HTTP + OAuth) — opt-in via MCP_HTTP_ENABLED. Off by default.
     # Pre-flight refusal: must NEVER coexist with FLASK_DEBUG=True (debug-mode
     # tracebacks would leak bearer tokens). See docs/prd/remote-mcp.md.
