@@ -8,8 +8,8 @@ whole point of the directory.
 
 ## The contract
 
-**Exactly one upstream file is modified.** `app.py` carries these lines, after
-its own blueprint registrations:
+**One upstream file is modified for the add-ons themselves.** `app.py` carries
+these lines, after its own blueprint registrations:
 
 ```python
 # Local add-ons (this deployment's own code, kept out of upstream files so
@@ -21,6 +21,18 @@ install_addons(app)
 
 An upstream change to `app.py` conflicts with this only if it lands on the same
 few lines, which is a one-line resolution rather than a merge.
+
+**Deployment adds two more, and they are not add-on code.** This fork runs on
+Elastic Beanstalk, which upstream does not target, so the fork owns its own
+process configuration:
+
+| Path | Owned by | Why |
+| --- | --- | --- |
+| `Procfile` | the fork | New file; upstream has none. Runs gunicorn with the eventlet worker and one worker, which is the runtime this codebase is tested on. It also overrides the platform's default command outright, which is what makes the boot deterministic. |
+| `requirements.txt` | upstream, +2 lines appended | `gunicorn` and `eventlet` were not listed. `install.sh` and `install-docker.sh` install them separately, so any deployment that only runs `pip install -r requirements.txt` gets neither -- and the eventlet worker cannot start. Appended at the end, after the existing appended block, so a merge lands cleanly. |
+
+Both are deployment configuration rather than local features, so they sit at the
+repo root where the platform looks for them. Everything else below still holds.
 
 **Nothing under `frontend/` is touched.** Each add-on serves its own page from
 its own blueprint, in plain HTML, CSS and JavaScript. Upstream CI force-commits

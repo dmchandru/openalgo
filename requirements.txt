@@ -148,3 +148,17 @@ zipp==3.23.1
 # Portfolio analytics for the Portfolio Backtester (metrics + tearsheets).
 # Pure-NumPy kernels -- no Numba, so nothing pins numpy's upper bound.
 openstatz==0.4.1
+
+# Production WSGI server. Not previously listed here because install.sh and
+# install-docker.sh install them separately, which leaves any deployment that
+# only runs `pip install -r requirements.txt` -- Elastic Beanstalk does exactly
+# that -- with no eventlet at all, and gunicorn's eventlet worker refuses to
+# start without it.
+#
+# The worker class is not a preference. Flask-SocketIO keeps its state in the
+# process and the platform's green/real thread rules are written for a patched
+# stdlib; the gthread worker Elastic Beanstalk defaults to is a different
+# runtime from the one this codebase is tested on. See the eventlet section of
+# CLAUDE.md. The command itself is in the Procfile at the repo root.
+gunicorn>=25.0,<26
+eventlet

@@ -21,9 +21,14 @@ So the rule is not a style preference:
 
 > **New local functionality goes in `addons/`. Nothing else is edited.**
 
-The current upstream footprint is **one file, six lines** — the
+The upstream footprint for the add-ons is **one file, six lines** — the
 `install_addons(app)` call in `app.py`. If a change seems to need a second
 upstream edit, that is the signal to find another way, not to make the edit.
+
+Deployment configuration is the one accepted exception, because upstream does
+not target Elastic Beanstalk: the fork owns `Procfile` (a new file) and two
+appended lines in `requirements.txt`. See the Deployment section below for why
+each exists.
 [`addons/README.md`](README.md) records the contract and every wrapper
 installed against upstream code.
 
@@ -181,7 +186,37 @@ reconciliation and the failed-exit-stays-open rule.
 
 Elastic Beanstalk, single instance, following
 [the upstream guide](https://docs.openalgo.in/installation-guidelines/getting-started/amazon-elastic-beanstalk).
-Two consequences that bear on any change here:
+
+### The boot command is the fork's, on purpose
+
+`Procfile` at the repo root:
+
+```
+web: gunicorn --worker-class eventlet --workers 1 --bind 127.0.0.1:8000 --timeout 300 --graceful-timeout 30 --log-level info app:app
+```
+
+A Procfile **overrides the platform's default command outright**, which is why
+it is used in preference to the `WSGIPath` option in
+`.ebextensions/01_flask.config`. That option did not take effect on this
+environment -- the deploy failed with `ModuleNotFoundError: No module named
+'application'`, which is the platform default, not the configured `app:app` --
+and settings saved on the environment itself take precedence over
+`.ebextensions`. The Procfile is not subject to that precedence, so the boot no
+longer depends on which layer wins.
+
+The worker class matters as much as the module path. The platform defaults to
+`gthread`, and the eventlet section of [`/CLAUDE.md`](../CLAUDE.md) describes a
+runtime with a monkey-patched stdlib that the green/real thread rules
+throughout this codebase are written against. `gthread` is a different runtime.
+`gunicorn` and `eventlet` are appended to `requirements.txt` because the
+platform's `pip install -r requirements.txt` is the only thing that installs
+anything, and neither was listed.
+
+If a deploy ever boots into `Using worker: gthread`, the Procfile is not being
+read -- check that it is at the **root of the source bundle**, not nested inside
+a directory in the zip.
+
+### Other consequences that bear on any change here:
 
 - **A deploy replaces the whole bundle**, and the guide does not address SQLite
   persistence. `db/openalgo.db` holds the encrypted WhatsApp device session,
