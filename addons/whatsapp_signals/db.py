@@ -1,33 +1,39 @@
 """Storage for WhatsApp-sourced signals.
 
-Three tables, all prefixed ``wa_signal_`` and all living in the main
+Five tables, all prefixed ``wa_signal_`` and all living in the main
 ``openalgo.db`` alongside the rest of the platform. They are created by this
-add-on's own ``init_db()`` and by ``upgrade/migrate_whatsapp_signals.py``; no
-upstream schema is touched, so an upstream migration can never collide.
+add-on's own ``init_db()`` and by the add-on's own migrate.py; no upstream
+schema is touched, so an upstream migration can never collide.
 
-    wa_signal_group     one row per WhatsApp group the server has seen. A group
-                        appears here the first time a message arrives from it,
-                        disabled and with no permission to trade anything. The
-                        operator enables it, which is the only way a group's
-                        messages ever reach an order path.
+    wa_signal_group         one row per WhatsApp group the server has seen. A
+                            group appears here the first time a message arrives
+                            from it, disabled and with no permission to trade
+                            anything. The operator enables it, which is the only
+                            way a group's messages ever reach an order path.
 
-    wa_signal_event     every message that was considered, what it parsed to,
-                        and what happened. This is the audit trail: a trader
-                        looking at a position needs to see the message that
-                        opened it and the message that moved its stop.
+    wa_signal_event         every message that was considered, what it parsed to,
+                            and what happened. This is the audit trail.
 
-    wa_signal_position  what this add-on believes it is holding, and which group
-                        and message opened it. The stop itself lives in
-                        ``scalping_sl_state`` where the tick-driven risk monitor
-                        can act on it; this table is the link back to the group,
-                        which is what lets "SL to 110" ten minutes later find
-                        the right leg.
+    wa_signal_position      what this add-on believes it is holding, and which
+                            group and message opened it.
+
+    wa_signal_order_profile named order configuration templates. A profile is
+                            created once and assigned to any number of groups,
+                            letting one "Nifty scalp" profile govern lots,
+                            order type, SL% and target% across all groups that
+                            trade the same strategy.
+
+    wa_signal_ai_suggestion AI-generated management recommendations waiting for
+                            the operator's Apply or Dismiss. Created when a
+                            follow-up message is parsed by the ai_manager tier
+                            and auto_apply_ai is off for the group.
 
 Retention is bounded on purpose. ``wa_signal_event`` records a row per message
 considered, including chat that parsed to nothing, so an untended install would
 otherwise grow forever on a busy group. Inserts prune beyond
 ``EVENT_RETENTION_ROWS``.
 """
+
 
 from __future__ import annotations
 
@@ -82,6 +88,39 @@ Base = declarative_base()
 Base.query = db_session.query_property()
 
 
+class WaSignalOrderProfile(Base):
+    """A named order configuration template.
+
+    Created once by the operator and assigned to any number of groups. When a
+    group has a profile, its order parameters override the group's own settings
+    for every signal the group produces. A group with no profile uses its own
+    settings unchanged.
+    """
+
+    __tablename__ = "wa_signal_order_profile"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(80), nullable=False, unique=True)
+
+    lots = Column(Integer, nullable=True)
+    max_lots = Column(Integer, nullable=True)
+    #: "MARKET" (default) or "LIMIT". A LIMIT entry buys at LTP + offset%,
+    #: sells at LTP - offset%, so the order reaches the book immediately but
+    #: gives a small edge when the spread allows.
+    order_type = Column(String(10), nullable=False, default="MARKET")
+    #: Signed percentage applied to LTP to compute the limit price.
+    #: Positive means above LTP for a BUY, below for a SELL (i.e. aggressive).
+    limit_price_offset_pct = Column(Float, nullable=True)
+    product = Column(String(10), nullable=True)
+    default_sl_pct = Column(Float, nullable=True)
+    default_target_pct = Column(Float, nullable=True)
+    trailing_enabled = Column(Boolean, nullable=True)
+    trailing_step = Column(Float, nullable=True)
+
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class WaSignalGroup(Base):
     """A WhatsApp group, and the authority it has been granted.
 
@@ -118,6 +157,30 @@ class WaSignalGroup(Base):
     default_target_pct = Column(Float, nullable=True)
     trailing_enabled = Column(Boolean, nullable=False, default=False)
     trailing_step = Column(Float, nullable=True)
+
+    #: "MARKET" (default) or "LIMIT". When LIMIT, the executor computes a price
+    #: from LTP +/- limit_price_offset_pct and sends that in the order payload.
+    order_type = Column(String(10), nullable=False, default="MARKET")
+    limit_price_offset_pct = Column(Float, nullable=True)
+
+    #: FK to wa_signal_order_profile. When set, profile values overlay the
+    #: group's own lots/SL%/target%/order_type for every signal.
+    order_profile_id = Column(Integer, nullable=True)
+
+    #: When True, the ai_manager's compound-message suggestions are applied
+    #: immediately without operator review. Off by default — the operator sees
+    #: them in the suggestions panel and clicks Apply.
+    auto_apply_ai = Column(Boolean, nullable=False, default=False)
+
+    #: When True, every inbound message is routed through ai_parser.py with a
+    #: rolling context window instead of the regex → LLM fallback chain.
+    #: Best for groups that send multi-message signal sequences.
+    ai_parser_mode = Column(Boolean, nullable=False, default=False)
+
+    #: Tick added to a "buy above X" trigger price so the LIMIT order has a
+    #: realistic chance of filling. Default 0.5 (half a rupee; works for most
+    #: NSE options that trade in 0.05 increments). Configurable per group.
+    above_tick_offset = Column(Float, nullable=False, default=0.5)
 
     llm_fallback = Column(Boolean, nullable=False, default=True)
     notify_operator = Column(Boolean, nullable=False, default=True)
@@ -187,10 +250,44 @@ class WaSignalPosition(Base):
     closed_at = Column(DateTime, nullable=True)
 
 
+class WaSignalAiSuggestion(Base):
+    """An AI-generated position-management recommendation pending operator review.
+
+    Created by ai_manager when a follow-up group message contains management
+    intent (move SL, book partial, etc.) and auto_apply_ai is off for that
+    group. The operator sees this in the suggestions panel, reviews the
+    reasoning, and clicks Apply or Dismiss.
+
+    status:
+        pending   — waiting for the operator
+        applied   — operator clicked Apply; the actions were executed
+        dismissed — operator clicked Dismiss; nothing was done
+        auto      — auto_apply_ai was on; the actions were executed immediately
+    """
+
+    __tablename__ = "wa_signal_ai_suggestion"
+
+    id = Column(Integer, primary_key=True)
+    chat_jid = Column(String(120), nullable=False, index=True)
+    position_id = Column(Integer, nullable=True)
+    event_id = Column(Integer, nullable=True)
+
+    #: Human-readable explanation from the model of what it read and why.
+    reasoning = Column(Text, nullable=True)
+    #: JSON list of action dicts. Each has keys: action, symbol, stop_loss,
+    #: target, fraction, sl_to_cost. Validated before storage.
+    suggested_actions = Column(Text, nullable=False, default="[]")
+
+    status = Column(String(10), nullable=False, default="pending", index=True)
+    created_at = Column(DateTime, nullable=False, default=utcnow, index=True)
+    resolved_at = Column(DateTime, nullable=True)
+
+
 def init_db() -> None:
     """Create the add-on's tables if they are absent. Idempotent."""
     Base.metadata.create_all(bind=engine)
     logger.info("WhatsApp signals tables ready")
+
 
 
 # ----------------------------------------------------------------------------
@@ -225,11 +322,18 @@ def group_to_dict(row: WaSignalGroup) -> dict[str, Any]:
         "default_target_pct": row.default_target_pct,
         "trailing_enabled": bool(row.trailing_enabled),
         "trailing_step": row.trailing_step,
+        "order_type": row.order_type or "MARKET",
+        "limit_price_offset_pct": row.limit_price_offset_pct,
+        "order_profile_id": row.order_profile_id,
+        "auto_apply_ai": bool(row.auto_apply_ai),
+        "ai_parser_mode": bool(row.ai_parser_mode),
+        "above_tick_offset": row.above_tick_offset if row.above_tick_offset is not None else 0.5,
         "llm_fallback": bool(row.llm_fallback),
         "notify_operator": bool(row.notify_operator),
         "message_count": row.message_count,
         "last_seen_at": row.last_seen_at.isoformat() if row.last_seen_at else None,
     }
+
 
 
 def event_to_dict(row: WaSignalEvent) -> dict[str, Any]:
@@ -274,6 +378,209 @@ def position_to_dict(row: WaSignalPosition) -> dict[str, Any]:
         "opened_at": row.opened_at.isoformat() if row.opened_at else None,
         "closed_at": row.closed_at.isoformat() if row.closed_at else None,
     }
+
+
+def profile_to_dict(row: WaSignalOrderProfile) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "name": row.name,
+        "lots": row.lots,
+        "max_lots": row.max_lots,
+        "order_type": row.order_type or "MARKET",
+        "limit_price_offset_pct": row.limit_price_offset_pct,
+        "product": row.product,
+        "default_sl_pct": row.default_sl_pct,
+        "default_target_pct": row.default_target_pct,
+        "trailing_enabled": row.trailing_enabled,
+        "trailing_step": row.trailing_step,
+    }
+
+
+def suggestion_to_dict(row: WaSignalAiSuggestion) -> dict[str, Any]:
+    try:
+        actions = json.loads(row.suggested_actions or "[]")
+    except (TypeError, ValueError):
+        actions = []
+    return {
+        "id": row.id,
+        "chat_jid": row.chat_jid,
+        "position_id": row.position_id,
+        "event_id": row.event_id,
+        "reasoning": row.reasoning,
+        "suggested_actions": actions,
+        "status": row.status,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
+    }
+
+
+# ----------------------------------------------------------------------------
+# Order profiles
+# ----------------------------------------------------------------------------
+
+_PROFILE_FIELDS: dict[str, str] = {
+    "name": "str",
+    "lots": "int",
+    "max_lots": "int",
+    "order_type": "order_type",
+    "limit_price_offset_pct": "float",
+    "product": "upper",
+    "default_sl_pct": "float",
+    "default_target_pct": "float",
+    "trailing_enabled": "bool",
+    "trailing_step": "float",
+}
+
+
+def list_profiles() -> list[dict[str, Any]]:
+    try:
+        rows = db_session.query(WaSignalOrderProfile).order_by(WaSignalOrderProfile.name).all()
+        return [profile_to_dict(r) for r in rows]
+    except Exception:
+        logger.exception("list_profiles failed")
+        db_session.rollback()
+        return []
+
+
+def save_profile(changes: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    """Create or update a named order profile. Returns (profile, error)."""
+    try:
+        profile_id = changes.get("id")
+        if profile_id:
+            row = db_session.query(WaSignalOrderProfile).filter_by(id=int(profile_id)).first()
+            if row is None:
+                return None, "No profile with that ID."
+        else:
+            name = str(changes.get("name") or "").strip()
+            if not name:
+                return None, "A profile needs a name."
+            row = WaSignalOrderProfile(name=name)
+            db_session.add(row)
+            db_session.flush()
+
+        for key, kind in _PROFILE_FIELDS.items():
+            if key not in changes:
+                continue
+            value = changes[key]
+            if value is None:
+                if kind in ("float", "int"):
+                    setattr(row, key, None)
+                continue
+            if kind == "bool":
+                setattr(row, key, bool(value))
+            elif kind == "int":
+                setattr(row, key, max(0, int(value)))
+            elif kind == "float":
+                setattr(row, key, float(value))
+            elif kind == "upper":
+                setattr(row, key, str(value).strip().upper() or None)
+            elif kind == "order_type":
+                ot = str(value).strip().upper()
+                if ot not in ("MARKET", "LIMIT"):
+                    return None, "Order type must be MARKET or LIMIT."
+                setattr(row, key, ot)
+            else:
+                setattr(row, key, str(value).strip() or None)
+
+        db_session.commit()
+        return profile_to_dict(row), None
+    except (TypeError, ValueError):
+        db_session.rollback()
+        return None, "One of those values is not a number."
+    except Exception:
+        logger.exception("save_profile failed")
+        db_session.rollback()
+        return None, "The profile could not be saved."
+
+
+def delete_profile(profile_id: int) -> bool:
+    try:
+        deleted = db_session.query(WaSignalOrderProfile).filter_by(id=profile_id).delete()
+        db_session.commit()
+        return bool(deleted)
+    except Exception:
+        logger.exception("delete_profile failed for id %s", profile_id)
+        db_session.rollback()
+        return False
+
+
+def get_profile(profile_id: int) -> dict[str, Any] | None:
+    try:
+        row = db_session.query(WaSignalOrderProfile).filter_by(id=profile_id).first()
+        return profile_to_dict(row) if row else None
+    except Exception:
+        logger.exception("get_profile failed for id %s", profile_id)
+        db_session.rollback()
+        return None
+
+
+# ----------------------------------------------------------------------------
+# AI suggestions
+# ----------------------------------------------------------------------------
+
+
+def create_suggestion(
+    chat_jid: str,
+    reasoning: str | None,
+    actions: list[dict[str, Any]],
+    *,
+    position_id: int | None = None,
+    event_id: int | None = None,
+    status: str = "pending",
+) -> dict[str, Any] | None:
+    try:
+        row = WaSignalAiSuggestion(
+            chat_jid=chat_jid,
+            position_id=position_id,
+            event_id=event_id,
+            reasoning=(reasoning or "")[:2000],
+            suggested_actions=json.dumps(actions),
+            status=status,
+        )
+        db_session.add(row)
+        db_session.commit()
+        return suggestion_to_dict(row)
+    except Exception:
+        logger.exception("create_suggestion failed")
+        db_session.rollback()
+        return None
+
+
+def list_suggestions(
+    chat_jid: str | None = None, status: str | None = "pending", limit: int = 50
+) -> list[dict[str, Any]]:
+    try:
+        q = db_session.query(WaSignalAiSuggestion)
+        if chat_jid:
+            q = q.filter_by(chat_jid=chat_jid)
+        if status:
+            q = q.filter_by(status=status)
+        rows = (
+            q.order_by(WaSignalAiSuggestion.created_at.desc())
+            .limit(max(1, min(limit, 200)))
+            .all()
+        )
+        return [suggestion_to_dict(r) for r in rows]
+    except Exception:
+        logger.exception("list_suggestions failed")
+        db_session.rollback()
+        return []
+
+
+def resolve_suggestion(suggestion_id: int, status: str) -> dict[str, Any] | None:
+    """Mark a suggestion as applied, dismissed, or auto."""
+    try:
+        row = db_session.query(WaSignalAiSuggestion).filter_by(id=suggestion_id).first()
+        if row is None:
+            return None
+        row.status = status
+        row.resolved_at = utcnow()
+        db_session.commit()
+        return suggestion_to_dict(row)
+    except Exception:
+        logger.exception("resolve_suggestion failed for id %s", suggestion_id)
+        db_session.rollback()
+        return None
 
 
 # ----------------------------------------------------------------------------
@@ -352,6 +659,12 @@ _GROUP_FIELDS: dict[str, str] = {
     "default_target_pct": "float",
     "trailing_enabled": "bool",
     "trailing_step": "float",
+    "order_type": "order_type",
+    "limit_price_offset_pct": "float",
+    "order_profile_id": "int_nullable",
+    "auto_apply_ai": "bool",
+    "ai_parser_mode": "bool",
+    "above_tick_offset": "float",
     "llm_fallback": "bool",
     "notify_operator": "bool",
 }
@@ -377,13 +690,15 @@ def update_group(
                 continue
             value = changes[key]
             if value is None:
-                if kind in ("float",):
+                if kind in ("float", "int_nullable"):
                     setattr(row, key, None)
                 continue
             if kind == "bool":
                 setattr(row, key, bool(value))
             elif kind == "int":
                 setattr(row, key, max(0, int(value)))
+            elif kind == "int_nullable":
+                setattr(row, key, int(value))
             elif kind == "float":
                 setattr(row, key, float(value))
             elif kind == "upper":
@@ -393,6 +708,11 @@ def update_group(
                 if mode not in ("analyze", "live"):
                     return None, "Trading mode must be either sandbox or live."
                 setattr(row, key, mode)
+            elif kind == "order_type":
+                ot = str(value).strip().upper()
+                if ot not in ("MARKET", "LIMIT"):
+                    return None, "Order type must be MARKET or LIMIT."
+                setattr(row, key, ot)
             elif kind == "list":
                 items = value if isinstance(value, list) else []
                 setattr(row, key, json.dumps([str(v).strip() for v in items if str(v).strip()]))

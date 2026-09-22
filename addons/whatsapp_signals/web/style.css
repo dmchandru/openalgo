@@ -121,7 +121,28 @@ tbody tr:last-child td { border-bottom: 0; }
 .tag.executed { background: rgba(76,175,80,.15); color: var(--ok); }
 .tag.rejected { background: rgba(224,160,60,.15); color: var(--warn); }
 .tag.failed   { background: rgba(239,83,80,.15); color: var(--danger); }
+.tag.pending_review { background: rgba(33,150,243,.15); color: #64b5f6; }
 .tag.ignored, .tag.duplicate { background: var(--panel-2); color: var(--muted); }
+
+.filter-bar { padding: 12px 18px; }
+.filter-row { display: flex; align-items: center; gap: 12px; }
+.filter-row select { max-width: 320px; }
+
+.suggestion-card {
+  border-top: 1px solid var(--line); padding: 14px 18px; display: grid; gap: 8px;
+}
+.suggestion-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.suggestion-reason { font-size: 13.5px; font-weight: 500; color: var(--text); }
+.action-pill {
+  display: inline-block; background: var(--panel-2); border: 1px solid var(--line);
+  padding: 3px 8px; border-radius: 6px; font-size: 12px; margin-right: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.profile-card { border-top: 1px solid var(--line); padding: 14px 18px; }
+.profile-head { display: flex; align-items: center; justify-content: space-between; }
+.profile-name { font-weight: 600; font-size: 14px; }
+.profile-meta { color: var(--muted); font-size: 12.5px; }
 
 .tester { padding: 0 18px 4px; display: grid; gap: 10px; }
 .tester-controls { display: flex; align-items: center; gap: 14px; }

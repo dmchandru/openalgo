@@ -18,12 +18,49 @@
 <main>
   <section class="panel" id="banner-slot"></section>
 
+  <section class="panel filter-bar">
+    <div class="filter-row">
+      <label for="group-filter"><strong>Filter Source:</strong></label>
+      <select id="group-filter">
+        <option value="">All groups / broadcasts</option>
+      </select>
+    </div>
+  </section>
+
+  <section class="panel" id="suggestions-panel" style="display: none;">
+    <div class="panel-head">
+      <h2>AI Management Suggestions</h2>
+      <p class="hint">Recommendations parsed from follow-up messages by AI. Click Apply to execute or Dismiss to discard.</p>
+    </div>
+    <div id="suggestions"></div>
+  </section>
+
+  <section class="panel" id="profiles-panel">
+    <div class="panel-head">
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div>
+          <h2>Order Profiles</h2>
+          <p class="hint">Reusable templates with custom lots, MARKET/LIMIT order types, and default SL/targets.</p>
+        </div>
+        <button class="btn ghost" id="new-profile-btn">+ New Profile</button>
+      </div>
+    </div>
+    <div id="profiles-form-slot"></div>
+    <div id="profiles-list"></div>
+  </section>
+
   <section class="panel">
     <div class="panel-head">
-      <h2>Groups</h2>
-      <p class="hint">Every group this linked device sees appears here. A group
-        trades nothing until you enable it.</p>
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div>
+          <h2>Groups</h2>
+          <p class="hint">Every group this linked device sees appears here. A group
+            trades nothing until you enable it.</p>
+        </div>
+        <button class="btn ghost" id="new-group-btn">+ Add Group JID</button>
+      </div>
     </div>
+    <div id="group-form-slot"></div>
     <div id="groups"></div>
   </section>
 

@@ -14,8 +14,12 @@
   var REFRESH_MS = 6000;
   var csrfToken = null;
   var state = null;
+  var activeChatJid = ''; // '' = all groups, or specific chat_jid
   var expanded = {};      // chat_jid -> whether its settings are open
   var dirty = {};         // chat_jid -> unsaved edits, so a refresh cannot wipe typing
+  var profileFormOpen = false;
+  var editingProfile = null;
+  var groupFormOpen = false;
 
   // ---------------------------------------------------------------- transport
 
@@ -65,7 +69,7 @@
     return node;
   }
 
-  function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+  function clear(node) { while (node && node.firstChild) node.removeChild(node.firstChild); }
 
   function money(v) {
     if (v === null || v === undefined || v === '') return '-';
@@ -144,6 +148,253 @@
     });
   }
 
+  function renderFilter() {
+    var select = document.getElementById('group-filter');
+    if (!select || !state) return;
+
+    var current = select.value || activeChatJid;
+    clear(select);
+
+    var allOpt = el('option', { value: '', text: 'All groups / broadcasts' });
+    if (!current) allOpt.selected = true;
+    select.appendChild(allOpt);
+
+    (state.groups || []).forEach(function (g) {
+      var name = (g.label || g.chat_jid.split('@')[0]) + (g.is_enabled ? ' (enabled)' : ' (disabled)');
+      var opt = el('option', { value: g.chat_jid, text: name });
+      if (g.chat_jid === current) opt.selected = true;
+      select.appendChild(opt);
+    });
+
+    select.onchange = function () {
+      activeChatJid = select.value;
+      renderGroups();
+      renderPositions();
+      renderEvents();
+      renderSuggestions();
+    };
+  }
+
+  function renderSuggestions() {
+    var panel = document.getElementById('suggestions-panel');
+    var host = document.getElementById('suggestions');
+    if (!panel || !host) return;
+    clear(host);
+
+    var items = (state && state.pending_suggestions) || [];
+    if (activeChatJid) {
+      items = items.filter(function (s) { return s.chat_jid === activeChatJid; });
+    }
+
+    if (!items.length) {
+      panel.style.display = 'none';
+      return;
+    }
+    panel.style.display = '';
+
+    items.forEach(function (s) {
+      var grp = (state.groups || []).find(function (g) { return g.chat_jid === s.chat_jid; });
+      var groupLabel = grp ? (grp.label || s.chat_jid.split('@')[0]) : s.chat_jid.split('@')[0];
+
+      var head = el('div', { class: 'suggestion-head' }, [
+        el('strong', { text: groupLabel }),
+        el('span', { class: 'group-meta', text: when(s.created_at) })
+      ]);
+
+      var reason = el('div', { class: 'suggestion-reason', text: s.reasoning || 'No details provided.' });
+
+      var actionsList = el('div', { class: 'actions-pills' }, (s.suggested_actions || []).map(function (a) {
+        var txt = a.action.replace('_', ' ').toUpperCase();
+        if (a.symbol) txt += ' ' + a.symbol;
+        if (a.stop_loss) txt += ' SL: ' + money(a.stop_loss);
+        if (a.sl_to_cost) txt += ' (SL to cost)';
+        if (a.target) txt += ' TGT: ' + money(a.target);
+        if (a.fraction) txt += ' (' + Math.round(a.fraction * 100) + '%)';
+        return el('span', { class: 'action-pill', text: txt });
+      }));
+
+      var applyBtn = el('button', { class: 'btn', text: 'Apply' });
+      var dismissBtn = el('button', { class: 'btn ghost', text: 'Dismiss' });
+      var statusSpan = el('span', {});
+
+      applyBtn.addEventListener('click', function () {
+        applyBtn.disabled = true;
+        dismissBtn.disabled = true;
+        statusSpan.textContent = 'Applying...';
+        postJSON('/whatsapp-signals/api/suggestion/apply', { id: s.id }).then(function (res) {
+          if (res.status === 'success') {
+            statusSpan.className = 'saved';
+            statusSpan.textContent = 'Applied: ' + (res.data ? res.data.status : 'done');
+            refresh();
+          } else {
+            statusSpan.className = 'failed';
+            statusSpan.textContent = res.message || 'Failed to apply.';
+            applyBtn.disabled = false;
+            dismissBtn.disabled = false;
+          }
+        });
+      });
+
+      dismissBtn.addEventListener('click', function () {
+        applyBtn.disabled = true;
+        dismissBtn.disabled = true;
+        postJSON('/whatsapp-signals/api/suggestion/dismiss', { id: s.id }).then(function () {
+          refresh();
+        });
+      });
+
+      var btns = el('div', { class: 'actions' }, [applyBtn, dismissBtn, statusSpan]);
+      var card = el('div', { class: 'suggestion-card' }, [head, reason, actionsList, btns]);
+      host.appendChild(card);
+    });
+  }
+
+  function renderProfiles() {
+    var host = document.getElementById('profiles-list');
+    var formSlot = document.getElementById('profiles-form-slot');
+    clear(host);
+    clear(formSlot);
+    if (!state) return;
+
+    var profiles = state.profiles || [];
+
+    // Form rendering if open
+    if (profileFormOpen) {
+      var p = editingProfile || {};
+      var isEdit = !!p.id;
+
+      var nameInput = el('input', { type: 'text', value: p.name || '', placeholder: 'e.g. Nifty Scalp Aggressive' });
+      var orderTypeSelect = el('select', {}, [
+        el('option', { value: 'MARKET', text: 'MARKET' }),
+        el('option', { value: 'LIMIT', text: 'LIMIT (Aggressive)' })
+      ]);
+      orderTypeSelect.value = p.order_type || 'MARKET';
+
+      var offsetInput = el('input', { type: 'number', step: '0.1', value: p.limit_price_offset_pct === null || p.limit_price_offset_pct === undefined ? '' : p.limit_price_offset_pct, placeholder: '0.0' });
+      var productSelect = el('select', {}, [
+        el('option', { value: 'MIS', text: 'MIS (intraday)' }),
+        el('option', { value: 'NRML', text: 'NRML (carry)' })
+      ]);
+      productSelect.value = p.product || 'MIS';
+
+      var lotsInput = el('input', { type: 'number', min: '1', value: p.lots || '' });
+      var maxLotsInput = el('input', { type: 'number', min: '1', value: p.max_lots || '' });
+      var slInput = el('input', { type: 'number', step: '0.1', value: p.default_sl_pct === null || p.default_sl_pct === undefined ? '' : p.default_sl_pct });
+      var tgtInput = el('input', { type: 'number', step: '0.1', value: p.default_target_pct === null || p.default_target_pct === undefined ? '' : p.default_target_pct });
+      var trailingCheck = el('input', { type: 'checkbox' });
+      trailingCheck.checked = !!p.trailing_enabled;
+      var trailingStepInput = el('input', { type: 'number', step: '0.1', value: p.trailing_step === null || p.trailing_step === undefined ? '' : p.trailing_step });
+
+      var grid = el('div', { class: 'grid' }, [
+        el('div', { class: 'field' }, [el('label', { text: 'Profile Name' }), nameInput]),
+        el('div', { class: 'field' }, [el('label', { text: 'Order Type' }), orderTypeSelect]),
+        el('div', { class: 'field' }, [el('label', { text: 'Limit Price Offset %' }), offsetInput]),
+        el('div', { class: 'field' }, [el('label', { text: 'Product' }), productSelect]),
+        el('div', { class: 'field' }, [el('label', { text: 'Lots' }), lotsInput]),
+        el('div', { class: 'field' }, [el('label', { text: 'Max Lots' }), maxLotsInput]),
+        el('div', { class: 'field' }, [el('label', { text: 'Default SL %' }), slInput]),
+        el('div', { class: 'field' }, [el('label', { text: 'Default Target %' }), tgtInput]),
+        el('div', { class: 'field' }, [el('label', { text: 'Trailing Step' }), trailingStepInput])
+      ]);
+
+      var checkDiv = el('div', { class: 'actions' }, [
+        el('label', { class: 'check' }, [trailingCheck, document.createTextNode(' Trail the stop')])
+      ]);
+
+      var saveBtn = el('button', { class: 'btn', text: isEdit ? 'Update profile' : 'Create profile' });
+      var cancelBtn = el('button', { class: 'btn ghost', text: 'Cancel' });
+      var formStatus = el('span', {});
+
+      saveBtn.addEventListener('click', function () {
+        var name = nameInput.value.trim();
+        if (!name) {
+          formStatus.className = 'failed';
+          formStatus.textContent = 'Name is required.';
+          return;
+        }
+        var payload = {
+          id: p.id,
+          name: name,
+          order_type: orderTypeSelect.value,
+          limit_price_offset_pct: offsetInput.value === '' ? null : Number(offsetInput.value),
+          product: productSelect.value,
+          lots: lotsInput.value === '' ? null : Number(lotsInput.value),
+          max_lots: maxLotsInput.value === '' ? null : Number(maxLotsInput.value),
+          default_sl_pct: slInput.value === '' ? null : Number(slInput.value),
+          default_target_pct: tgtInput.value === '' ? null : Number(tgtInput.value),
+          trailing_enabled: trailingCheck.checked,
+          trailing_step: trailingStepInput.value === '' ? null : Number(trailingStepInput.value)
+        };
+
+        saveBtn.disabled = true;
+        postJSON('/whatsapp-signals/api/profile', payload).then(function (res) {
+          if (res.status === 'success') {
+            profileFormOpen = false;
+            editingProfile = null;
+            refresh();
+          } else {
+            saveBtn.disabled = false;
+            formStatus.className = 'failed';
+            formStatus.textContent = res.message || 'Could not save profile.';
+          }
+        });
+      });
+
+      cancelBtn.addEventListener('click', function () {
+        profileFormOpen = false;
+        editingProfile = null;
+        renderProfiles();
+      });
+
+      var formWrap = el('div', { style: 'border-top: 1px solid var(--line); padding: 14px 18px;' }, [
+        grid, checkDiv, el('div', { class: 'actions' }, [saveBtn, cancelBtn, formStatus])
+      ]);
+      formSlot.appendChild(formWrap);
+    }
+
+    if (!profiles.length && !profileFormOpen) {
+      host.appendChild(el('p', { class: 'empty', text: 'No order profiles created yet. Create one to assign customized parameters to groups.' }));
+      return;
+    }
+
+    profiles.forEach(function (prof) {
+      var head = el('div', { class: 'profile-head' }, [
+        el('span', { class: 'profile-name', text: prof.name }),
+        el('div', { class: 'actions', style: 'margin-top:0' }, [
+          (function () {
+            var btn = el('button', { class: 'btn ghost', text: 'Edit' });
+            btn.addEventListener('click', function () {
+              editingProfile = prof;
+              profileFormOpen = true;
+              renderProfiles();
+            });
+            return btn;
+          })(),
+          (function () {
+            var btn = el('button', { class: 'btn ghost', text: 'Delete' });
+            btn.addEventListener('click', function () {
+              if (!window.confirm('Delete profile "' + prof.name + '"? Groups using it will revert to group defaults.')) return;
+              postJSON('/whatsapp-signals/api/profile/delete', { id: prof.id }).then(refresh);
+            });
+            return btn;
+          })()
+        ])
+      ]);
+
+      var metaText = 'Type: ' + prof.order_type +
+        (prof.limit_price_offset_pct ? ' (' + prof.limit_price_offset_pct + '%)' : '') +
+        ' | Lots: ' + (prof.lots || 'default') + ' (max ' + (prof.max_lots || 'default') + ')' +
+        ' | Product: ' + (prof.product || 'default') +
+        ' | SL: ' + (prof.default_sl_pct ? prof.default_sl_pct + '%' : 'default') +
+        ' | TGT: ' + (prof.default_target_pct ? prof.default_target_pct + '%' : 'none') +
+        ' | Trailing: ' + (prof.trailing_enabled ? 'Yes (' + (prof.trailing_step || 'default') + ')' : 'No');
+
+      var meta = el('div', { class: 'profile-meta', text: metaText });
+      var card = el('div', { class: 'profile-card' }, [head, meta]);
+      host.appendChild(card);
+    });
+  }
+
   function groupValue(jid, key, fallback) {
     if (dirty[jid] && Object.prototype.hasOwnProperty.call(dirty[jid], key)) return dirty[jid][key];
     return fallback;
@@ -183,14 +434,71 @@
 
   function renderGroups() {
     var host = document.getElementById('groups');
+    var formSlot = document.getElementById('group-form-slot');
     clear(host);
+    clear(formSlot);
+
+    if (formSlot && groupFormOpen) {
+      var jidInput = el('input', { type: 'text', placeholder: '120363xxxx@g.us, @newsletter or @broadcast JID' });
+      var labelInput = el('input', { type: 'text', placeholder: 'e.g. My Signal Group' });
+      var grid = el('div', { class: 'grid' }, [
+        el('div', { class: 'field' }, [el('label', { text: 'Group JID / Phone' }), jidInput]),
+        el('div', { class: 'field' }, [el('label', { text: 'Group Name / Label' }), labelInput])
+      ]);
+      var addBtn = el('button', { class: 'btn', text: 'Add Group' });
+      var cancelBtn = el('button', { class: 'btn ghost', text: 'Cancel' });
+      var formStatus = el('span', {});
+
+      addBtn.addEventListener('click', function () {
+        var rawJid = jidInput.value.trim();
+        if (!rawJid) {
+          formStatus.className = 'failed';
+          formStatus.textContent = 'Group JID is required.';
+          return;
+        }
+        addBtn.disabled = true;
+        postJSON('/whatsapp-signals/api/group', {
+          chat_jid: rawJid,
+          label: labelInput.value.trim() || null,
+          is_enabled: false
+        }).then(function (res) {
+          if (res.status === 'success') {
+            groupFormOpen = false;
+            refresh();
+          } else {
+            addBtn.disabled = false;
+            formStatus.className = 'failed';
+            formStatus.textContent = res.message || 'Could not add group.';
+          }
+        });
+      });
+
+      cancelBtn.addEventListener('click', function () {
+        groupFormOpen = false;
+        renderGroups();
+      });
+
+      var wrap = el('div', { style: 'border-top: 1px solid var(--line); padding: 14px 18px;' }, [
+        grid, el('div', { class: 'actions' }, [addBtn, cancelBtn, formStatus])
+      ]);
+      formSlot.appendChild(wrap);
+    }
+
     var groups = (state && state.groups) || [];
+    if (activeChatJid) {
+      groups = groups.filter(function (g) { return g.chat_jid === activeChatJid; });
+    }
     if (!groups.length) {
       host.appendChild(el('p', { class: 'empty', text:
-        'No groups seen yet. Once the linked device receives a message in a group, ' +
-        'that group appears here.' }));
+        activeChatJid ? 'Selected group not found in record.' :
+        'No groups seen yet. When a message is posted in any WhatsApp group on your phone, it will appear here automatically. Or use "+ Add Group JID" above to add a group manually.' }));
       return;
     }
+
+    var profileOptions = [['', 'None (custom group settings below)']];
+    (state.profiles || []).forEach(function (p) {
+      profileOptions.push([String(p.id), p.name]);
+    });
 
     groups.forEach(function (g) {
       var jid = g.chat_jid;
@@ -210,22 +518,40 @@
         renderGroups();
       });
 
-      var head = el('div', { class: 'group-head' }, [
+      var headChildren = [
         el('span', { class: 'group-name', text: g.label || jid.split('@')[0] }),
         el('span', { class: 'group-jid', text: jid }),
         el('span', { class: 'group-meta', text:
-          g.message_count + ' messages seen - last ' + when(g.last_seen_at) }),
-        toggle, settingsBtn
-      ]);
+          g.message_count + ' messages seen - last ' + when(g.last_seen_at) })
+      ];
+      if (g.ai_parser_mode) {
+        headChildren.splice(1, 0, el('span', {
+          class: 'tag',
+          style: 'background: #2563eb; color: #fff; font-size: 10px; font-weight: 600; padding: 2px 6px; border-radius: 3px;',
+          text: 'AI PARSER'
+        }));
+      }
+      headChildren.push(toggle, settingsBtn);
+      var head = el('div', { class: 'group-head' }, headChildren);
 
       var block = el('div', { class: 'group' }, [head]);
 
       if (open) {
         var grid = el('div', { class: 'grid' }, [
           field(jid, 'label', 'Name', 'text', groupValue(jid, 'label', g.label || '')),
+          field(jid, 'order_profile_id', 'Order Profile', 'select',
+            groupValue(jid, 'order_profile_id', g.order_profile_id === null ? '' : String(g.order_profile_id)),
+            profileOptions),
           field(jid, 'execution_mode', 'Trade in', 'select',
             groupValue(jid, 'execution_mode', g.execution_mode),
             [['analyze', 'Sandbox'], ['live', 'Live money']]),
+          field(jid, 'order_type', 'Order Type', 'select',
+            groupValue(jid, 'order_type', g.order_type || 'MARKET'),
+            [['MARKET', 'MARKET'], ['LIMIT', 'LIMIT']]),
+          field(jid, 'limit_price_offset_pct', 'Limit Offset %', 'number',
+            groupValue(jid, 'limit_price_offset_pct', g.limit_price_offset_pct)),
+          field(jid, 'above_tick_offset', '"Buy above" Tick Offset', 'number',
+            groupValue(jid, 'above_tick_offset', g.above_tick_offset !== undefined && g.above_tick_offset !== null ? g.above_tick_offset : 0.5)),
           field(jid, 'product', 'Product', 'select',
             groupValue(jid, 'product', g.product),
             [['MIS', 'MIS (intraday)'], ['NRML', 'NRML (carry)']]),
@@ -246,8 +572,10 @@
         ]);
 
         var checks = el('div', { class: 'actions' }, [
+          checkbox(jid, 'ai_parser_mode', 'AI Parser (context-aware multi-message reading)', g.ai_parser_mode),
           checkbox(jid, 'trailing_enabled', 'Trail the stop', g.trailing_enabled),
           checkbox(jid, 'llm_fallback', 'Use the model for messages the rules cannot read', g.llm_fallback),
+          checkbox(jid, 'auto_apply_ai', 'Auto-apply AI management suggestions immediately', g.auto_apply_ai),
           checkbox(jid, 'notify_operator', 'Message me what was done', g.notify_operator)
         ]);
 
@@ -260,6 +588,9 @@
               .split(',').map(function (s) { return s.trim(); })
               .filter(function (s) { return s.length; });
             delete changes.allowed_senders_text;
+          }
+          if (Object.prototype.hasOwnProperty.call(changes, 'order_profile_id')) {
+            changes.order_profile_id = changes.order_profile_id === '' ? null : Number(changes.order_profile_id);
           }
           save(jid, changes, status);
         });
@@ -301,6 +632,9 @@
     var host = document.getElementById('positions');
     clear(host);
     var rows = ((state && state.positions) || []).filter(function (p) { return p.status === 'open'; });
+    if (activeChatJid) {
+      rows = rows.filter(function (p) { return p.chat_jid === activeChatJid; });
+    }
     if (!rows.length) {
       host.appendChild(el('p', { class: 'empty', text: 'No open positions from a signal.' }));
       return;
@@ -330,6 +664,9 @@
     var host = document.getElementById('events');
     clear(host);
     var rows = (state && state.events) || [];
+    if (activeChatJid) {
+      rows = rows.filter(function (e) { return e.chat_jid === activeChatJid; });
+    }
     if (!rows.length) {
       host.appendChild(el('p', { class: 'empty', text:
         'Nothing yet. Messages from enabled groups show up here as they arrive.' }));
@@ -348,7 +685,7 @@
         el('td', { text: when(e.received_at) }),
         el('td', { class: 'msg', text: e.text || '' }),
         el('td', { text: readAs }),
-        el('td', {}, [el('span', { class: 'tag ' + e.status, text: e.status })]),
+        el('td', {}, [el('span', { class: 'tag ' + (e.status || ''), text: e.status })]),
         el('td', { class: 'msg', text: e.detail || '' })
       ]));
     });
@@ -400,6 +737,9 @@
   function render() {
     renderStatus();
     renderBanners();
+    renderFilter();
+    renderSuggestions();
+    renderProfiles();
     renderGroups();
     renderPositions();
     renderEvents();
@@ -414,6 +754,23 @@
       var slot = document.getElementById('banner-slot');
       clear(slot);
       slot.appendChild(el('p', { class: 'notice bad', text: err.message }));
+    });
+  }
+
+  var newProfBtn = document.getElementById('new-profile-btn');
+  if (newProfBtn) {
+    newProfBtn.addEventListener('click', function () {
+      profileFormOpen = !profileFormOpen;
+      editingProfile = null;
+      renderProfiles();
+    });
+  }
+
+  var newGrpBtn = document.getElementById('new-group-btn');
+  if (newGrpBtn) {
+    newGrpBtn.addEventListener('click', function () {
+      groupFormOpen = !groupFormOpen;
+      renderGroups();
     });
   }
 

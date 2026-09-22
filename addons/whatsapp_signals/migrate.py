@@ -8,8 +8,7 @@ Run from the project root:
 It deliberately does **not** live in ``upgrade/migrate_all.py``. That file
 belongs to upstream, and adding a line to it would put a conflict in every
 future pull for the sake of one entry. Run this alongside the upstream
-migrations instead -- the deployment notes in ``docs/whatsapp-signals.md`` say
-so in the upgrade step.
+migrations instead -- the deployment notes say so in the upgrade step.
 
 Creating the tables is also done by the add-on's own ``init_db()`` at start-up,
 so a fresh install needs nothing. This script exists for the case that one does
@@ -34,11 +33,29 @@ from sqlalchemy import inspect, text  # noqa: E402
 
 from addons.whatsapp_signals import db  # noqa: E402
 
+#: All tables this add-on owns. Checked for presence; missing ones are created
+#: by init_db() → create_all().
+_TABLES = (
+    "wa_signal_group",
+    "wa_signal_event",
+    "wa_signal_position",
+    "wa_signal_order_profile",
+    "wa_signal_ai_suggestion",
+)
+
 #: Columns added after the first release, as (table, column, DDL type clause).
 #: Append here when the model gains a field; never rewrite an existing entry.
-_ADDED_COLUMNS: list[tuple[str, str, str]] = []
-
-_TABLES = ("wa_signal_group", "wa_signal_event", "wa_signal_position")
+#: The DDL clause is what follows the column name in SQLite ALTER TABLE syntax.
+_ADDED_COLUMNS: list[tuple[str, str, str]] = [
+    # v2 — configurable order parameters & AI management
+    ("wa_signal_group", "order_type", "VARCHAR(10) NOT NULL DEFAULT 'MARKET'"),
+    ("wa_signal_group", "limit_price_offset_pct", "FLOAT"),
+    ("wa_signal_group", "order_profile_id", "INTEGER"),
+    ("wa_signal_group", "auto_apply_ai", "BOOLEAN NOT NULL DEFAULT 0"),
+    # v3 — AI parser mode & above-price tick offset
+    ("wa_signal_group", "ai_parser_mode", "BOOLEAN NOT NULL DEFAULT 0"),
+    ("wa_signal_group", "above_tick_offset", "FLOAT NOT NULL DEFAULT 0.5"),
+]
 
 
 def _existing_tables() -> set[str]:

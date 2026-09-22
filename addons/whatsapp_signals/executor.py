@@ -61,6 +61,45 @@ logger = get_logger(__name__)
 STRATEGY_TAG = "WhatsApp Signals"
 
 
+def _effective_group(group: dict[str, Any]) -> dict[str, Any]:
+    """Return a group dict with any assigned order profile merged in.
+
+    Profile values take precedence over the group's own settings for the fields
+    they define (lots, max_lots, order_type, limit_price_offset_pct, product,
+    default_sl_pct, default_target_pct, trailing_enabled, trailing_step).
+    Fields the profile leaves as None are left to the group's own value.
+
+    The merge is done on a shallow copy so the original group dict is unchanged.
+    """
+    profile_id = group.get("order_profile_id")
+    if not profile_id:
+        return group
+    try:
+        profile = db.get_profile(int(profile_id))
+    except Exception:
+        logger.debug("Profile lookup failed for id %s", profile_id)
+        return group
+    if not profile:
+        return group
+
+    merged = dict(group)
+    for key in (
+        "lots",
+        "max_lots",
+        "order_type",
+        "limit_price_offset_pct",
+        "product",
+        "default_sl_pct",
+        "default_target_pct",
+        "trailing_enabled",
+        "trailing_step",
+    ):
+        value = profile.get(key)
+        if value is not None:
+            merged[key] = value
+    return merged
+
+
 class Outcome:
     """What happened to one signal, in the vocabulary the event log uses."""
 
@@ -371,6 +410,9 @@ def match_position(
 def execute(signal: ParsedSignal, group: dict[str, Any], chat_jid: str) -> Outcome:
     """Run one parsed signal against the account. Never raises."""
     try:
+        # Overlay any assigned order profile before any gate or cap check.
+        group = _effective_group(group)
+
         mode, refusal = check_mode(group)
         if refusal:
             return _rejected(refusal)
@@ -396,6 +438,145 @@ def execute(signal: ParsedSignal, group: dict[str, Any], chat_jid: str) -> Outco
         return _failed("Something went wrong sending that signal. Check the logs.")
     finally:
         _remove_sessions()
+
+
+def execute_sequence(
+    actions: list[dict[str, Any]], group: dict[str, Any], chat_jid: str
+) -> list[Outcome]:
+    """Run a list of AI-manager action dicts left to right.
+
+    Stops at the first failure so a bad partial-exit cannot be followed by a
+    stop move that would leave the position unprotected. Returns all outcomes
+    (including the stopping failure) so the caller can log them.
+
+    Each action dict must have the shape returned by ai_manager._validate_action:
+        action, symbol, stop_loss, target, fraction, sl_to_cost.
+    """
+    from addons.whatsapp_signals.parser import ParsedSignal as PS
+
+    group = _effective_group(group)
+    outcomes: list[Outcome] = []
+
+    for action_dict in actions:
+        action = action_dict.get("action", "")
+        try:
+            outcome = _execute_one_action(action, action_dict, group, chat_jid)
+        except Exception:
+            logger.exception("execute_sequence crashed on action %s", action)
+            outcome = _failed(f"Action {action} crashed unexpectedly.")
+
+        outcomes.append(outcome)
+        if outcome.status in ("failed", "rejected"):
+            # Stop the sequence: later actions may depend on this one.
+            break
+
+    _remove_sessions()
+    return outcomes
+
+
+def _execute_one_action(
+    action: str, action_dict: dict[str, Any], group: dict[str, Any], chat_jid: str
+) -> Outcome:
+    """Execute one action dict from the AI manager.  Does not call _remove_sessions."""
+    mode, refusal = check_mode(group)
+    if refusal:
+        return _rejected(refusal)
+
+    api_key = _api_key()
+    if not api_key:
+        return _failed("Nobody is logged in to OpenAlgo.")
+
+    symbol = action_dict.get("symbol")
+
+    # Find the target position — by symbol if named, or the only open one.
+    positions = db.open_positions(chat_jid, mode=mode)
+    if not positions:
+        return _rejected("No open position to apply that to.")
+
+    if symbol:
+        position = next((p for p in positions if p["symbol"] == symbol), None)
+        if position is None:
+            return _rejected(f"No open position in {symbol}.")
+    elif len(positions) == 1:
+        position = positions[0]
+    else:
+        held = ", ".join(p["symbol"] for p in positions)
+        return _rejected(
+            f"That action did not name a symbol and the group holds more than one: {held}."
+        )
+
+    if action == "set_sl":
+        stop_loss = action_dict.get("stop_loss")
+        sl_to_cost = bool(action_dict.get("sl_to_cost"))
+        if sl_to_cost:
+            entry = position.get("entry_price")
+            if not entry:
+                return _rejected("Entry price not on record; cannot move stop to cost.")
+            stop_loss = round(float(entry), 2)
+        if stop_loss is None:
+            return _rejected("set_sl needs a stop_loss value or sl_to_cost=true.")
+        target = action_dict.get("target") or position.get("target")
+        instrument = resolver.ResolvedInstrument(
+            symbol=position["symbol"],
+            exchange=position["exchange"],
+            product=position["product"],
+            lotsize=0,
+            expiry=None,
+            kind="option",
+        )
+        written = _write_stop(
+            instrument,
+            mode=mode,
+            side=position["side"],
+            quantity=int(position["quantity"] or 0),
+            entry_price=position.get("entry_price"),
+            stop_loss=stop_loss,
+            target=target,
+            trailing_enabled=bool(group.get("trailing_enabled")),
+            trailing_step=group.get("trailing_step"),
+        )
+        if not written:
+            return _failed(f"Stop for {position['symbol']} could not be saved.")
+        db.update_position(position["id"], stop_loss=stop_loss, target=target)
+        detail = f"Stop on {position['symbol']} moved to {stop_loss}"
+        if sl_to_cost:
+            detail += " (cost)"
+        return Outcome("executed", detail, position_id=position["id"])
+
+    if action == "set_target":
+        target = action_dict.get("target")
+        if target is None:
+            return _rejected("set_target needs a target value.")
+        instrument = resolver.ResolvedInstrument(
+            symbol=position["symbol"],
+            exchange=position["exchange"],
+            product=position["product"],
+            lotsize=0,
+            expiry=None,
+            kind="option",
+        )
+        written = _write_stop(
+            instrument,
+            mode=mode,
+            side=position["side"],
+            quantity=int(position["quantity"] or 0),
+            entry_price=position.get("entry_price"),
+            stop_loss=position.get("stop_loss"),
+            target=target,
+            trailing_enabled=bool(group.get("trailing_enabled")),
+            trailing_step=group.get("trailing_step"),
+        )
+        if not written:
+            return _failed(f"Target for {position['symbol']} could not be saved.")
+        db.update_position(position["id"], target=target)
+        return Outcome("executed", f"Target on {position['symbol']} set to {target}",
+                       position_id=position["id"])
+
+    if action in ("exit", "partial_exit"):
+        fraction = action_dict.get("fraction") if action == "partial_exit" else None
+        return _exit_one(position, api_key, mode, fraction)
+
+    return _rejected(f"Unknown action '{action}'.")
 
 
 def _enter(
@@ -442,17 +623,58 @@ def _enter(
     ltp = _last_price(instrument.symbol, instrument.exchange, api_key)
     reference_price = ltp or signal.entry_price
 
+    # "Buy above 68" — entry_price is a trigger level. Add tick_offset so the
+    # LIMIT order actually fills. The offset is per-group (default 0.5).
+    adjusted_entry_price = signal.entry_price
+    if signal.is_above_price and signal.entry_price and signal.entry_price > 0:
+        tick_offset = float(group.get("above_tick_offset") or 0.5)
+        if signal.side == "BUY":
+            adjusted_entry_price = round(signal.entry_price + tick_offset, 2)
+        else:
+            adjusted_entry_price = round(signal.entry_price - tick_offset, 2)
+        logger.debug(
+            "above-price trigger %s → LIMIT %s (offset %.2f)",
+            signal.entry_price,
+            adjusted_entry_price,
+            tick_offset,
+        )
+
     from services.place_order_service import place_order
 
-    order_data = {
+    order_type = (group.get("order_type") or "MARKET").upper()
+    order_data: dict[str, Any] = {
         "strategy": STRATEGY_TAG,
         "symbol": instrument.symbol,
         "exchange": instrument.exchange,
         "action": side,
-        "pricetype": "MARKET",
         "product": instrument.product,
         "quantity": quantity,
     }
+
+    if order_type == "LIMIT":
+        # Priority 1: signal carries an explicit price (or "above X" + offset) → use it.
+        # Priority 2: LTP available — compute aggressive limit with the offset%.
+        # Priority 3: neither — fall back to MARKET so the order still goes through.
+        explicit_price = adjusted_entry_price if adjusted_entry_price and adjusted_entry_price > 0 else None
+        if explicit_price:
+            order_data["pricetype"] = "LIMIT"
+            order_data["price"] = round(float(explicit_price), 2)
+        elif ltp and ltp > 0:
+            offset_pct = float(group.get("limit_price_offset_pct") or 0.0)
+            # Aggressive LIMIT: BUY slightly above LTP, SELL slightly below,
+            # so the order fills quickly when the spread allows it.
+            if side == "BUY":
+                limit_price = round(ltp * (1 + abs(offset_pct) / 100.0), 2)
+            else:
+                limit_price = round(ltp * (1 - abs(offset_pct) / 100.0), 2)
+            order_data["pricetype"] = "LIMIT"
+            order_data["price"] = limit_price
+        else:
+            # No LTP and no explicit price — cannot safely compute a LIMIT price.
+            order_data["pricetype"] = "MARKET"
+    else:
+        order_data["pricetype"] = "MARKET"
+
     prefetched = {"ltp": ltp} if ltp else None
     ok, response, _code = place_order(
         order_data=order_data, api_key=api_key, prefetched_quote=prefetched
@@ -713,10 +935,16 @@ def _exit(
     position, error = match_position(signal, chat_jid, mode)
     if position is None:
         return _rejected(error or "That position could not be identified.")
-    return _exit_one(position, api_key, mode, fraction)
+    return _exit_one(position, api_key, mode, fraction, signal=signal)
 
 
-def _exit_one(position: dict[str, Any], api_key: str, mode: str, fraction: float | None) -> Outcome:
+def _exit_one(
+    position: dict[str, Any],
+    api_key: str,
+    mode: str,
+    fraction: float | None,
+    signal: ParsedSignal | None = None,
+) -> Outcome:
     """Send one closing order, sized to what is actually held."""
     symbol = position["symbol"]
     exchange = position["exchange"]
@@ -757,7 +985,22 @@ def _exit_one(position: dict[str, Any], api_key: str, mode: str, fraction: float
 
     remaining = abs(net_qty) - quantity
     if remaining > 0:
-        db.update_position(position["id"], quantity=remaining)
+        new_sl = position.get("stop_loss")
+        if signal:
+            if signal.sl_to_cost:
+                entry = position.get("entry_price")
+                if entry:
+                    new_sl = round(float(entry), 2)
+            elif signal.stop_loss is not None:
+                new_sl = signal.stop_loss
+
+        sl_update: dict[str, Any] = {"quantity": remaining}
+        if new_sl is not None:
+            sl_update["stop_loss"] = new_sl
+            db.update_position(position["id"], quantity=remaining, stop_loss=new_sl)
+        else:
+            db.update_position(position["id"], quantity=remaining)
+
         from database.scalping_db import upsert_sl_state
 
         upsert_sl_state(
@@ -766,13 +1009,19 @@ def _exit_one(position: dict[str, Any], api_key: str, mode: str, fraction: float
                 "exchange": exchange,
                 "product": product,
                 "mode": mode,
-                "quantity": remaining,
+                **sl_update,
             }
         )
         _notify_risk_monitor()
+
+        detail = f"Closed {quantity} of {symbol}, {remaining} still open"
+        if signal and (signal.sl_to_cost or signal.stop_loss is not None) and new_sl is not None:
+            detail += f" with stop moved to {new_sl}."
+        else:
+            detail += " on the same stop."
         return Outcome(
             "executed",
-            f"Closed {quantity} of {symbol}, {remaining} still open on the same stop.",
+            detail,
             position_id=position["id"],
         )
 

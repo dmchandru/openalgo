@@ -97,11 +97,15 @@ _PARTIAL_RE = re.compile(
     r"\b(?:BOOK|EXIT|SELL|REDUCE|TRIM)\s+(?:PARTIAL\b|HALF\b|"
     + _NUM
     + r"\s*(?:%|PERCENT\b|PCT\b))|"
-    r"\bPARTIAL\s+(?:BOOK|EXIT)\b"
+    r"\bPARTIAL\s+(?:BOOK|EXIT)\b|"
+    r"\bBOOK\s+(?:PARTIAL\s*/\s*FULL|PARTIAL\s+OR\s+FULL)\b"
 )
 _PERCENT_RE = re.compile(r"\b" + _NUM + r"\s*(?:%|PERCENT\b|PCT\b)")
 _HALF_RE = re.compile(r"\bHALF\b")
-_BOOK_PROFIT_RE = re.compile(r"\bBOOK\s+(?:PROFIT|PROFITS|IT|NOW)\b")
+_BOOK_PROFIT_RE = re.compile(
+    r"\b(?:SAFE\s+TRADERS\s+)?BOOK\s+(?:PROFIT|PROFITS|IT|NOW|HERE|SAFE\s+PROFIT|SOME\s+PROFIT)\b|"
+    r"\bBOOK\s+(?:PARTIAL\s*/\s*FULL|PARTIAL\s+OR\s+FULL)\b"
+)
 
 _TRAIL_RE = re.compile(r"\bTRAIL(?:ING)?\b")
 
@@ -109,16 +113,27 @@ _TRAIL_RE = re.compile(r"\bTRAIL(?:ING)?\b")
 
 _SL_RE = re.compile(
     r"\b(?:SL|S\s*/\s*L|STOP\s*-?\s*LOSS|STOPLOSS|STOP)\s*"
-    r"(?:IS|TO|AT|@|:|=|REVISED\s+TO|MOVED\s+TO)?\s*" + _NUM
+    r"(?:IS|TO|AT|@|:|=|REVISED\s+TO|MOVED\s+TO|TRAILED\s+TO|SHIFTED\s+TO|MODIFIED\s+TO)?\s*" + _NUM
 )
 _SL_TO_COST_RE = re.compile(
-    r"\b(?:SL|S\s*/\s*L|STOP\s*-?\s*LOSS|STOPLOSS)\s*"
-    r"(?:IS|TO|AT|@|:|=)?\s*(?:COST|ENTRY|BREAK\s*-?\s*EVEN|BE|NO\s*LOSS)\b"
+    r"\b(?:SL|S\s*/\s*L|STOP\s*-?\s*LOSS|STOPLOSS|STOP)\s*"
+    r"(?:IS|TO|AT|@|:|=|REVISED\s+TO|MOVED\s+TO|TRAILED\s+TO|SHIFTED\s+TO|MODIFIED\s+TO)?\s*"
+    r"(?:COST|ENTRY|BREAK\s*-?\s*EVEN|BE|NO\s*LOSS)\b"
 )
-_TARGET_RE = re.compile(r"\b(?:TGT|TARGET|TP|T1)\s*(?:IS|TO|AT|@|:|=)?\s*" + _NUM)
+_TARGET_RE = re.compile(r"\b(?:TGT|TARGETS?|TP|T1)\s*(?:IS|TO|AT|@|:|=)?\s*" + _NUM)
+# Slash-separated multi-target list: "Tgt 78/95/115/140" or "T1 78 T2 95 T3 115"
+_MULTI_TARGET_RE = re.compile(
+    r"\b(?:TGT|TARGETS?|TP)\s*[:\s\-]?\s*"
+    r"(\d+(?:\.\d+)?)"                        # T1 (mandatory)
+    r"(?:\s*[/,]\s*(\d+(?:\.\d+)?))?"        # T2 (optional)
+    r"(?:\s*[/,]\s*(\d+(?:\.\d+)?))?"        # T3
+    r"(?:\s*[/,]\s*(\d+(?:\.\d+)?))?"        # T4
+)
 _ENTRY_PRICE_RE = re.compile(
     r"(?:@|\bAT\b|\bABOVE\b|\bAROUND\b|\bNEAR\b|\bCMP\b|\bPRICE\b|\bENTRY\b|\bRS\.?)\s*" + _NUM
 )
+# Detects specifically "ABOVE X" (not "AT/@ X") so the executor can add tick_offset.
+_ABOVE_PRICE_RE = re.compile(r"\bABOVE\s+" + _NUM)
 _LOTS_RE = re.compile(r"\b(\d{1,3})\s*LOTS?\b")
 
 # --- report, not instruction ----------------------------------------------
@@ -164,8 +179,14 @@ class ParsedSignal:
     is_futures: bool = False
 
     entry_price: float | None = None
+    #: True when the entry price was stated as "above X" (trigger, not at-price).
+    #: The executor will add ``group.above_tick_offset`` to the stated price.
+    is_above_price: bool = False
     stop_loss: float | None = None
+    #: Primary target (first in a multi-target list, or the only one).
     target: float | None = None
+    #: Full target list when the group posts "Tgt 78/95/115/140".
+    targets: tuple[float, ...] = field(default_factory=tuple)
     sl_to_cost: bool = False
     trail: bool = False
 
@@ -201,6 +222,7 @@ class ParsedSignal:
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["warnings"] = list(self.warnings)
+        data["targets"] = list(self.targets)
         return data
 
 
@@ -307,6 +329,60 @@ def _extract_fraction(text: str) -> float | None:
     return 0.5  # "book partial" with no number: half is the group convention
 
 
+def _extract_targets(norm: str) -> tuple[float, ...]:
+    """Parse a multi-target list into a tuple of floats.
+
+    Handles:
+      Tgt 78/95/115/140
+      Tgt: 78 / 95 / 115 / 140
+      Tgt 78, 95, 115, 140
+      Target: 78, 95, 115, 140
+      T1 78 T2 95 T3 115 T4 140
+      T1: 78, T2: 95
+      Target 1 - 78, Target 2 - 95
+    """
+    # 1. Pattern like "T1 78 T2 95 T3 115" or "Target 1: 78, Target 2: 95"
+    t_num_matches = re.findall(r"\b(?:T|TARGET\s*)\d+\s*[:\-=@]?\s*(\d+(?:\.\d+)?)\b", norm)
+    if len(t_num_matches) > 1:
+        try:
+            return tuple(float(x) for x in t_num_matches[:6])
+        except (ValueError, TypeError):
+            pass
+
+    # 2. Pattern like "TGT: 78/95/115/140" or "TGT 78, 95, 115, 140" or "TARGETS 78 95 115"
+    m = re.search(r"\b(?:TGT|TARGETS?|TP)\s*[:\-=@]?\s*(\d+(?:\.\d+)?(?:[\s/,]+(?:\d+(?:\.\d+)?))+)", norm)
+    if m:
+        nums = re.findall(r"\b(\d+(?:\.\d+)?)\b", m.group(1))
+        if len(nums) > 1:
+            try:
+                return tuple(float(x) for x in nums[:6])
+            except (ValueError, TypeError):
+                pass
+
+    # 3. Fallback to single target / standard multi-regex
+    m = _MULTI_TARGET_RE.search(norm)
+    if m:
+        result = []
+        for i in range(1, 5):
+            v = m.group(i)
+            if v is not None:
+                try:
+                    result.append(float(v))
+                except (TypeError, ValueError):
+                    pass
+        if result:
+            return tuple(result)
+
+    return ()
+
+
+# Standalone "Active" confirmation variations — not a trading instruction.
+_ACTIVE_RE = re.compile(
+    r"^\s*(?:NOW\s+)?(?:(?:CALL|TRADE|ORDER|POSITION|SIGNAL)\s+)?(?:ACTIVE|ACTIVATED)(?:\s+NOW)?\s*$",
+    re.IGNORECASE,
+)
+
+
 def parse(text: str) -> ParsedSignal:
     """Read one message. Never raises; an unreadable message parses to ``none``."""
     raw = text or ""
@@ -318,6 +394,10 @@ def parse(text: str) -> ParsedSignal:
     if norm.startswith("/"):
         return ParsedSignal(raw=raw, note="bot command, not a signal")
 
+    # "Active" alone is a signal-provider confirmation — not a trading instruction.
+    if _ACTIVE_RE.match(norm):
+        return ParsedSignal(informational=True, note="active confirmation, already entered", raw=raw)
+
     leg = _extract_leg(norm)
     has_buy = bool(_BUY_RE.search(norm))
     has_sell = bool(_SELL_RE.search(norm))
@@ -326,8 +406,12 @@ def parse(text: str) -> ParsedSignal:
 
     sl_value = _first_float(_SL_RE.search(norm))
     sl_to_cost = bool(_SL_TO_COST_RE.search(norm))
-    target_value = _first_float(_TARGET_RE.search(norm))
+    # Multi-target: captures all 4 slots; target_value is T1 (or single target).
+    all_targets = _extract_targets(norm)
+    target_value = all_targets[0] if all_targets else _first_float(_TARGET_RE.search(norm))
     entry_price = _first_float(_ENTRY_PRICE_RE.search(norm))
+    # Detect "above X" — entry trigger, not a limit price; executor will add offset.
+    is_above_price = bool(_ABOVE_PRICE_RE.search(norm))
     trail = bool(_TRAIL_RE.search(norm))
     lots_match = _LOTS_RE.search(norm)
     lots = int(lots_match.group(1)) if lots_match else None
@@ -350,12 +434,15 @@ def parse(text: str) -> ParsedSignal:
         # so this only guards the case where the marker precedes the strike.
         if entry_price is not None and leg["strike"] is not None and entry_price == leg["strike"]:
             entry_price = None
+            is_above_price = False
         return ParsedSignal(
             action=ENTRY,
             side=side,
             entry_price=entry_price,
+            is_above_price=is_above_price and entry_price is not None,
             stop_loss=sl_value,
             target=target_value,
+            targets=all_targets,
             trail=trail,
             lots=lots,
             note="option entry",
@@ -373,37 +460,54 @@ def parse(text: str) -> ParsedSignal:
             expiry=None,
             is_futures=False,
             entry_price=entry_price,
+            is_above_price=is_above_price and entry_price is not None,
             stop_loss=sl_value,
             target=target_value,
+            targets=all_targets,
             trail=trail,
             lots=lots,
             note="equity entry",
             raw=raw,
         )
 
-    # 2. Partial exit before full exit: "book half" contains neither an exit
-    #    verb nor a full-exit intent, and "book 50%" must not read as "book".
-    if _PARTIAL_RE.search(norm) and not is_report:
-        fraction = _extract_fraction(norm)
-        if fraction is not None and fraction >= 1.0:
-            return ParsedSignal(action=EXIT, note="book 100% reads as a full exit", **common)
-        return ParsedSignal(action=PARTIAL_EXIT, fraction=fraction, note="partial exit", **common)
+    # 2. Exit or Partial exit.
+    # An imperative to book or exit wins even if the message also reports a
+    # preceding event ("Target 78 hit 🎯 Book partial / full" or "Target done, exit").
+    # Pure status reports ("Target 78 hit", "SL hit", "Booked at 150") carry no
+    # imperative verb and fall through to step 5 (informational).
+    has_partial = bool(_PARTIAL_RE.search(norm))
+    has_exit = bool(_EXIT_RE.search(norm) or _BOOK_PROFIT_RE.search(norm))
 
-    # 3. An exit verb that names a size is a partial, whatever verb it used.
-    #    "get out of half the position" carries a full-exit verb and a partial
-    #    size, and reading only the verb closes the whole position when the
-    #    instruction was to keep some on.
-    exit_verb = bool(_EXIT_RE.search(norm) or _BOOK_PROFIT_RE.search(norm))
-    if exit_verb and not is_report:
-        sized = _partial_hint(norm)
-        if sized is not None and sized < 1.0:
+    if (has_partial or has_exit) and not is_chatter:
+        fraction = _extract_fraction(norm) if has_partial else _partial_hint(norm)
+        if fraction is not None and fraction >= 1.0:
             return ParsedSignal(
-                action=PARTIAL_EXIT,
-                fraction=sized,
-                note="exit of part of the position",
+                action=EXIT,
+                sl_to_cost=sl_to_cost,
+                stop_loss=sl_value,
+                trail=trail,
+                note="book full reads as exit",
                 **common,
             )
-        return ParsedSignal(action=EXIT, note="exit", **common)
+        if fraction is not None:
+            return ParsedSignal(
+                action=PARTIAL_EXIT,
+                fraction=fraction,
+                sl_to_cost=sl_to_cost,
+                stop_loss=sl_value,
+                trail=trail,
+                note="target hit — book partial" if is_report else "partial exit",
+                **common,
+            )
+        if has_exit:
+            return ParsedSignal(
+                action=EXIT,
+                sl_to_cost=sl_to_cost,
+                stop_loss=sl_value,
+                trail=trail,
+                note="target hit — exit" if is_report else "exit",
+                **common,
+            )
 
     # 4. Stop to cost, which is a level change with no number of its own.
     if sl_to_cost:
@@ -431,7 +535,13 @@ def parse(text: str) -> ParsedSignal:
             **common,
         )
     if target_value is not None:
-        return ParsedSignal(action=SET_TARGET, target=target_value, note="target update", **common)
+        return ParsedSignal(
+            action=SET_TARGET,
+            target=target_value,
+            targets=all_targets,
+            note="target update",
+            **common,
+        )
 
     if is_report:
         return ParsedSignal(informational=True, note="status update", **common)

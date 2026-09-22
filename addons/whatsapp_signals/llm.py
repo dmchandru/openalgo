@@ -70,8 +70,10 @@ Reply with ONE JSON object and nothing else. No prose, no code fence.
   "expiry": "DDMMMYY" as written in the message, or null,
   "is_futures": true | false,
   "entry_price": number or null,
+  "is_above_price": true | false,
   "stop_loss": number or null,
   "target": number or null,
+  "targets": [number, ...] or null,
   "sl_to_cost": true | false,
   "trail": true | false,
   "lots": integer or null,
@@ -217,6 +219,20 @@ def _to_signal(content: str, raw: str) -> ParsedSignal | None:
     if fraction is not None and not (0 < fraction < 1):
         fraction = None
 
+    raw_targets = data.get("targets")
+    targets: tuple[float, ...] = ()
+    if isinstance(raw_targets, list):
+        parsed_targets = []
+        for v in raw_targets:
+            n = _as_number(v)
+            if n is not None and n > 0:
+                parsed_targets.append(n)
+        targets = tuple(parsed_targets)
+
+    target = values["target"]
+    if target is None and targets:
+        target = targets[0]
+
     signal = ParsedSignal(
         action=action,
         tier="llm",
@@ -227,8 +243,10 @@ def _to_signal(content: str, raw: str) -> ParsedSignal | None:
         expiry=(str(data.get("expiry")).strip().upper() if data.get("expiry") else None),
         is_futures=bool(data.get("is_futures")),
         entry_price=values["entry_price"],
+        is_above_price=bool(data.get("is_above_price")),
         stop_loss=values["stop_loss"],
-        target=values["target"],
+        target=target,
+        targets=targets,
         sl_to_cost=bool(data.get("sl_to_cost")),
         trail=bool(data.get("trail")),
         lots=int(lots) if lots and lots > 0 else None,

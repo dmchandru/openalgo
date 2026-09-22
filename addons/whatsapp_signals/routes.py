@@ -77,6 +77,8 @@ def state():
             "groups": db.list_groups(),
             "positions": db.list_positions(chat_jid, limit=50),
             "events": db.list_events(chat_jid, limit=100),
+            "profiles": db.list_profiles(),
+            "pending_suggestions": db.list_suggestions(chat_jid, status="pending"),
         }
     )
 
@@ -99,8 +101,18 @@ def save_group():
     chat_jid = (payload.get("chat_jid") or "").strip()
     if not chat_jid:
         return _error("Pick a group first.")
-    if not chat_jid.endswith(ingest.GROUP_SUFFIX):
-        return _error("That is not a WhatsApp group. Only groups can send signals.")
+
+    # Accept @g.us groups, @newsletter channels, and @broadcast lists.
+    # If no @ at all treat as bare digits and auto-suffix as a group JID.
+    if not any(chat_jid.endswith(s) for s in ingest.ALLOWED_SUFFIXES):
+        if "@" not in chat_jid:
+            chat_jid = f"{chat_jid}{ingest.GROUP_SUFFIX}"
+            payload["chat_jid"] = chat_jid
+        else:
+            return _error(
+                "That JID type is not supported. Use a @g.us group, "
+                "@newsletter channel, or @broadcast list."
+            )
 
     group, error = db.update_group(chat_jid, payload)
     if error:
@@ -123,6 +135,90 @@ def remove_group():
     if not chat_jid:
         return _error("Pick a group first.")
     return _ok({"deleted": db.delete_group(chat_jid)})
+
+
+@bp.route("/api/profiles")
+@check_session_validity
+def profiles():
+    return _ok(db.list_profiles())
+
+
+@bp.route("/api/profile", methods=["POST"])
+@check_session_validity
+def save_profile():
+    payload = request.get_json(silent=True) or {}
+    profile, error = db.save_profile(payload)
+    if error:
+        return _error(error)
+    return _ok(profile)
+
+
+@bp.route("/api/profile/delete", methods=["POST"])
+@check_session_validity
+def remove_profile():
+    payload = request.get_json(silent=True) or {}
+    profile_id = payload.get("id")
+    if not profile_id:
+        return _error("Profile ID required.")
+    return _ok({"deleted": db.delete_profile(int(profile_id))})
+
+
+@bp.route("/api/suggestions")
+@check_session_validity
+def suggestions():
+    chat_jid = (request.args.get("chat_jid") or "").strip() or None
+    status_filter = (request.args.get("status") or "pending").strip() or None
+    return _ok(db.list_suggestions(chat_jid, status=status_filter))
+
+
+@bp.route("/api/suggestion/apply", methods=["POST"])
+@check_session_validity
+def apply_suggestion():
+    payload = request.get_json(silent=True) or {}
+    suggestion_id = payload.get("id")
+    if not suggestion_id:
+        return _error("Suggestion ID required.")
+
+    row = db.db_session.query(db.WaSignalAiSuggestion).filter_by(id=int(suggestion_id)).first()
+    if not row:
+        return _error("No suggestion with that ID.")
+    if row.status != "pending":
+        return _error(f"Suggestion is already {row.status}.")
+
+    sug = db.suggestion_to_dict(row)
+    group = db.get_group(sug["chat_jid"]) or {}
+    outcomes = executor.execute_sequence(sug["suggested_actions"], group, sug["chat_jid"])
+
+    any_executed = any(o.status == "executed" for o in outcomes)
+    final_status = "executed" if any_executed else "failed"
+    detail = " | ".join(o.detail for o in outcomes)
+
+    if sug.get("event_id"):
+        db.update_event(sug["event_id"], status=final_status, detail=detail)
+
+    resolved = db.resolve_suggestion(int(suggestion_id), "applied")
+    return _ok({"suggestion": resolved, "outcomes": [o.detail for o in outcomes], "status": final_status})
+
+
+@bp.route("/api/suggestion/dismiss", methods=["POST"])
+@check_session_validity
+def dismiss_suggestion():
+    payload = request.get_json(silent=True) or {}
+    suggestion_id = payload.get("id")
+    if not suggestion_id:
+        return _error("Suggestion ID required.")
+
+    row = db.db_session.query(db.WaSignalAiSuggestion).filter_by(id=int(suggestion_id)).first()
+    if not row:
+        return _error("No suggestion with that ID.")
+    if row.status != "pending":
+        return _error(f"Suggestion is already {row.status}.")
+
+    if row.event_id:
+        db.update_event(row.event_id, status="ignored", detail="Suggestion dismissed by operator.")
+
+    resolved = db.resolve_suggestion(int(suggestion_id), "dismissed")
+    return _ok(resolved)
 
 
 @bp.route("/api/parse", methods=["POST"])
