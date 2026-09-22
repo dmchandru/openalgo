@@ -81,6 +81,18 @@ dependencies = [
   "nest-asyncio==1.6.0",
   "numpy==2.4.4",
   "openalgo==2.0.5",
+  # The engine that runs a compiled OpenScript strategy, in this language.
+  # The compiler is the npm package the frontend holds, and the production
+  # image carries no JavaScript runtime, which is the whole reason a second
+  # engine exists. Pinned exactly: the two halves are one release, and a live
+  # run has to agree with the backtest that preceded it.
+  #
+  # Held at 0.4.0 for a while because that was the only release on the index
+  # while the compiler had moved to 0.5.0. The two agreed on the thing that
+  # actually has to agree, the compiled program format, which is 1.1 on both,
+  # so nothing was broken by it; what was wrong was the sentence above saying
+  # the halves are one release while they were not.
+  "openscript==0.5.0",
   "ordered-set==4.1.0",
   "orjson==3.12.0",
   "packaging==24.1",
