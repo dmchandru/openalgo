@@ -605,6 +605,24 @@ def _enter(
             "so nothing was sent. Send an exit first if that is what was meant."
         )
 
+    # Skip re-entry when we already hold a same-side position in this instrument.
+    # Pyramiding (adding to a running position on every new signal) is almost
+    # never what a group means when it re-issues an entry price during a trade:
+    # it is updating the call, not asking for a second lot. Skipping keeps the
+    # position at the size that was originally intended.
+    if existing and (existing.get("side") or "").upper() == side:
+        logger.info(
+            "Skip re-entry: group already holds %s %s (id=%s). "
+            "Exit first to open a fresh position.",
+            side, instrument.symbol, existing.get("id"),
+        )
+        return Outcome(
+            "ignored",
+            f"Already holding {side} {instrument.symbol} (qty {existing.get('quantity')}). "
+            "Signal skipped — exit the current position before entering again.",
+            position_id=existing.get("id"),
+        )
+
     cap_refusal = check_caps(group, chat_jid, mode, opens_a_new_leg=existing is None)
     if cap_refusal:
         return _rejected(cap_refusal)

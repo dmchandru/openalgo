@@ -264,10 +264,21 @@ def test_regex_pure_reports_remain_informational():
     assert sig1.action == parser.NONE
     assert sig1.informational is True
 
-    sig2 = parser.parse("SL hit")
+    sig2 = parser.parse("Target hit")
     assert sig2.action == parser.NONE
     assert sig2.informational is True
 
     sig3 = parser.parse("Booked profit at 150")
     assert sig3.action == parser.NONE
     assert sig3.informational is True
+
+
+def test_sl_hit_and_cancel_triggers_exit():
+    sig1 = parser.parse("SL hit")
+    assert sig1.action == parser.EXIT
+
+    sig2 = parser.parse("Stop loss hit")
+    assert sig2.action == parser.EXIT
+
+    sig3 = parser.parse("Cancel")
+    assert sig3.action == parser.EXIT

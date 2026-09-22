@@ -42,6 +42,8 @@ from addons.whatsapp_signals.parser import ENTRY, EXIT, NONE, PARTIAL_EXIT, SET_
         ("Square off everything", EXIT),
         ("Book full profit", EXIT),
         ("Book 100%", EXIT),
+        ("Cancel", EXIT),
+        ("SL hit", EXIT),
         # Partials.
         ("Book half", PARTIAL_EXIT),
         ("Book 50%", PARTIAL_EXIT),
@@ -54,7 +56,6 @@ from addons.whatsapp_signals.parser import ENTRY, EXIT, NONE, PARTIAL_EXIT, SET_
         # Not instructions. Every one of these has been read as an order by a
         # naive matcher at some point; that is why they are here.
         ("Target 150 achieved", NONE),
-        ("SL hit", NONE),
         ("Booked half at 150", NONE),
         ("TGT 1 done", NONE),
         ("good morning all", NONE),

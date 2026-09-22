@@ -88,8 +88,12 @@ _SELL_RE = re.compile(r"\b(?:SELL|SELLING|SHORT|GO\s+SHORT|WRITE)\b")
 
 _EXIT_RE = re.compile(
     r"\b(?:EXIT|SQUARE\s*-?\s*OFF|SQUAREOFF|SQ\s*OFF|CLOSE\s+(?:ALL|POSITION|IT)|"
-    r"BOOK\s+(?:FULL|ALL|OUT|COMPLETE)|GET\s+OUT|CUT\s+(?:IT|ALL))\b"
+    r"BOOK\s+(?:FULL|ALL|OUT|COMPLETE)|GET\s+OUT|CUT\s+(?:IT|ALL)|"
+    r"CANCEL\s*(?:CALL|TRADE|SIGNAL|POSITION|ORDER)?|ABORT\s*(?:CALL|TRADE|SIGNAL)?|"
+    r"IGNORE\s*(?:CALL|SIGNAL)?)\b"
 )
+# Bare "Cancel" / "Abort" / "Ignore" with no following noun also exits.
+_CANCEL_RE = re.compile(r"^\s*(?:CANCEL|ABORT|IGNORE)\s*$", re.IGNORECASE)
 # No trailing \b after the percent branch: "%" is not a word character, so a
 # boundary there would demand a letter after it and "book 50%" -- which is how
 # the instruction is actually written -- would not match.
@@ -142,6 +146,17 @@ _LOTS_RE = re.compile(r"\b(\d{1,3})\s*LOTS?\b")
 _REPORT_RE = re.compile(
     r"\b(?:ACHIEVED|ACHIVED|DONE|REACHED|BOOKED|COMPLETED|MET|HIT|TRIGGERED|"
     r"FILLED|GONE|MADE|PROFIT\s+BOOKED|CAME)\b"
+)
+# "SL hit" / "Stop hit" / "SL triggered" / "Stop loss hit" — the provider
+# telling us the stop fired. We treat this as an exit instruction so that if
+# the risk monitor missed it (e.g. sandbox with no live ticks after hours),
+# the position is still closed. Safe: the executor checks live qty first,
+# so a double-exit after the monitor already fired sends nothing.
+_SL_HIT_RE = re.compile(
+    r"\b(?:SL|S\s*/\s*L|STOP\s*-?\s*LOSS?|STOPLOSS?)\s+"
+    r"(?:HIT|TRIGGERED|REACHED|DONE|OUT|FIRED|ACTIVATED)\b|"
+    r"\bSTOP\s+HIT\b",
+    re.IGNORECASE,
 )
 # Questions and commentary are never instructions.
 _CHATTER_RE = re.compile(r"[?]\s*$|\b(?:WHAT|WHY|HOW|WHEN|ANYONE|SIR|THANKS|THANK\s+YOU)\b")
@@ -397,6 +412,18 @@ def parse(text: str) -> ParsedSignal:
     # "Active" alone is a signal-provider confirmation — not a trading instruction.
     if _ACTIVE_RE.match(norm):
         return ParsedSignal(informational=True, note="active confirmation, already entered", raw=raw)
+
+    # "Cancel" / "Abort" / "Ignore" alone means the provider is calling off the trade.
+    # Exit any open position for this instrument immediately.
+    if _CANCEL_RE.match(raw):
+        return ParsedSignal(action=EXIT, note="call cancelled by provider", raw=raw)
+
+    # "SL hit" / "Stop hit" / "SL triggered" — provider reporting that the stop fired.
+    # Exit any still-open position so the DB stays in sync even when the risk
+    # monitor missed the tick (e.g. sandbox during off-hours). The executor checks
+    # live qty before sending any order, so a double-exit is a safe no-op.
+    if _SL_HIT_RE.search(norm):
+        return ParsedSignal(action=EXIT, note="SL hit — closing any open position", raw=raw)
 
     leg = _extract_leg(norm)
     has_buy = bool(_BUY_RE.search(norm))

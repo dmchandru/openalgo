@@ -332,40 +332,46 @@ def test_a_sell_on_a_leg_already_held_long_is_refused(group, order_path):
     assert len(db.open_positions(group["chat_jid"], mode="analyze")) == 1
 
 
-def test_adding_to_a_leg_keeps_one_position_at_a_weighted_cost(group, order_path, monkeypatch):
-    """One leg, one stop row, one cost. The stop is keyed by the leg, so a
-    second position row would give it two entry prices to trail from."""
+def test_adding_to_a_leg_is_skipped_when_position_exists(group, order_path, monkeypatch):
+    """A second entry signal for the same instrument and side is now skipped
+    instead of pyramiding into the position. The group must exit first before
+    a fresh entry is accepted."""
     executor._enter(_entry(stop_loss=100.0), group, group["chat_jid"], "analyze", "k")
     monkeypatch.setattr(executor, "_last_price", lambda *a, **k: 100.0)
     outcome = executor._enter(_entry(), group, group["chat_jid"], "analyze", "k")
 
-    assert outcome.status == "executed"
+    assert outcome.status == "ignored"
+    assert "Already holding" in outcome.detail
+    # Only one order should have been placed (the first entry)
+    assert len(order_path["placed"]) == 1
+    # Position quantity unchanged
     positions = db.open_positions(group["chat_jid"], mode="analyze")
     assert len(positions) == 1
-    assert positions[0]["quantity"] == 150
-    assert positions[0]["lots"] == 2
-    assert positions[0]["entry_price"] == 110.0  # (120 + 100) / 2
-    # The stop row and the position row must agree on that cost.
-    assert order_path["stops"][-1]["entry_price"] == 110.0
-    assert order_path["stops"][-1]["quantity"] == 150
+    assert positions[0]["quantity"] == 75  # only the first lot
 
 
-def test_an_add_keeps_the_stop_it_already_had(group, order_path, monkeypatch):
+def test_re_entry_on_existing_position_is_skipped_not_added(group, order_path, monkeypatch):
+    """A second BUY on the same leg is silently skipped — stop stays from the
+    first entry, no second order is placed."""
     executor._enter(_entry(stop_loss=100.0), group, group["chat_jid"], "analyze", "k")
     monkeypatch.setattr(executor, "_last_price", lambda *a, **k: 100.0)
-    executor._enter(_entry(), group, group["chat_jid"], "analyze", "k")
+    outcome = executor._enter(_entry(), group, group["chat_jid"], "analyze", "k")
+    assert outcome.status == "ignored"
+    # Stop from first entry still intact
     assert order_path["stops"][-1]["stop_loss"] == 100.0
+    assert len(order_path["placed"]) == 1
 
 
-def test_an_add_is_not_blocked_by_the_open_position_cap(group, order_path):
-    """A group able to enter a leg and then unable to finish building it is a
-    cap doing something nobody asked it to."""
+def test_re_entry_is_ignored_not_blocked_by_position_cap(group, order_path):
+    """A second entry for the same leg is now skipped at the re-entry guard,
+    not at the cap check. The cap is for NEW legs, not re-entry on the same one."""
     db.update_group(group["chat_jid"], {"max_open_positions": 1})
     reloaded = db.get_group(group["chat_jid"])
     executor._enter(_entry(), reloaded, group["chat_jid"], "analyze", "k")
     outcome = executor._enter(_entry(), reloaded, group["chat_jid"], "analyze", "k")
-    assert outcome.status == "executed"
-    assert len(order_path["placed"]) == 2
+    # Skipped by re-entry guard, not the cap
+    assert outcome.status == "ignored"
+    assert len(order_path["placed"]) == 1
 
 
 def test_a_new_leg_is_blocked_by_the_open_position_cap(group, order_path, monkeypatch):
