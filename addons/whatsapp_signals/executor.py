@@ -370,7 +370,7 @@ def sender_allowed(group: dict[str, Any], sender_jid: str | None) -> bool:
 
 
 def match_position(
-    signal: ParsedSignal, chat_jid: str, mode: str
+    signal: ParsedSignal, chat_jid: str, mode: str, api_key: str | None = None
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Find the position a follow-up message refers to.
 
@@ -381,6 +381,24 @@ def match_position(
     positions = db.open_positions(chat_jid, mode=mode)
     if not positions:
         return None, "There is no open position from this group to apply that to."
+
+    # If the group has multiple open positions on record, verify against live net qty:
+    # positions that were closed at the broker (by risk monitor, square-off, or manual)
+    # are reconciled and marked closed so stale records don't block follow-ups.
+    if api_key and len(positions) > 1:
+        try:
+            truly_open = []
+            for p in positions:
+                live = _live_net_qty(p["symbol"], p["exchange"], p["product"], api_key)
+                if live == 0:
+                    _clear_stop(p["symbol"], p["exchange"], p["product"], mode)
+                    db.update_position(p["id"], status="closed")
+                else:
+                    truly_open.append(p)
+            if truly_open:
+                positions = truly_open
+        except Exception:
+            logger.debug("Live position reconciliation skipped", exc_info=True)
 
     if signal.names_leg:
         instrument, error = resolver.resolve(signal, positions[0].get("product") or "MIS")
@@ -428,7 +446,7 @@ def execute(signal: ParsedSignal, group: dict[str, Any], chat_jid: str) -> Outco
         if signal.action == ENTRY:
             return _enter(signal, group, chat_jid, mode, api_key)
         if signal.action in (SET_SL, SET_TARGET):
-            return _adjust(signal, group, chat_jid, mode)
+            return _adjust(signal, group, chat_jid, mode, api_key)
         if signal.action == EXIT:
             return _exit(signal, group, chat_jid, mode, api_key, fraction=None)
         if signal.action == PARTIAL_EXIT:
@@ -859,9 +877,15 @@ def _find_open(
     return None
 
 
-def _adjust(signal: ParsedSignal, group: dict[str, Any], chat_jid: str, mode: str) -> Outcome:
+def _adjust(
+    signal: ParsedSignal,
+    group: dict[str, Any],
+    chat_jid: str,
+    mode: str,
+    api_key: str | None = None,
+) -> Outcome:
     """Move the stop or the target on a position the group already holds."""
-    position, error = match_position(signal, chat_jid, mode)
+    position, error = match_position(signal, chat_jid, mode, api_key=api_key)
     if position is None:
         return _rejected(error or "That position could not be identified.")
 
@@ -1060,7 +1084,7 @@ def _exit(
             return Outcome("failed", detail)
         return Outcome("executed", detail)
 
-    position, error = match_position(signal, chat_jid, mode)
+    position, error = match_position(signal, chat_jid, mode, api_key=api_key)
     if position is None:
         return _rejected(error or "That position could not be identified.")
     return _exit_one(position, api_key, mode, fraction, signal=signal)

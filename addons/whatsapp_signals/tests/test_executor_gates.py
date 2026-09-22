@@ -208,6 +208,27 @@ def test_an_unqualified_follow_up_is_refused_when_several_are_open(group):
     assert "did not say which position" in error
 
 
+def test_reconciling_flat_position_allows_unqualified_follow_up(group, monkeypatch):
+    """If one of two DB positions is flat at the broker, it is auto-closed so
+    the follow-up cleanly matches the one truly active position."""
+    chat = group["chat_jid"]
+    _open(chat, "NIFTY28OCT2525000CE")
+    _open(chat, "BANKNIFTY28OCT2552000PE")
+
+    def fake_live(symbol, exchange, product, api_key):
+        return 0 if symbol == "NIFTY28OCT2525000CE" else 35
+
+    monkeypatch.setattr(executor, "_live_net_qty", fake_live)
+    monkeypatch.setattr(executor, "_clear_stop", lambda *a, **k: None)
+
+    position, error = executor.match_position(
+        ParsedSignal(stop_loss=110.0), chat, "analyze", api_key="test_key"
+    )
+    assert error is None
+    assert position is not None
+    assert position["symbol"] == "BANKNIFTY28OCT2552000PE"
+
+
 def test_a_follow_up_with_no_open_position_is_refused(group):
     position, error = executor.match_position(
         ParsedSignal(stop_loss=110.0), group["chat_jid"], "analyze"

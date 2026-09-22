@@ -117,18 +117,21 @@ _BOOK_PROFIT_RE = re.compile(
     r"\bBOOK\s+(?:PARTIAL\s*/\s*FULL|PARTIAL\s+OR\s+FULL)\b"
 )
 
-_TRAIL_RE = re.compile(r"\bTRAIL(?:ING)?\b")
+_TRAIL_RE = re.compile(r"\b(?:TRAIL(?:ING)?|TSL)\b", re.IGNORECASE)
 
 # --- levels ----------------------------------------------------------------
 
 _SL_RE = re.compile(
-    r"\b(?:SL|S\s*/\s*L|STOP\s*-?\s*LOSS|STOPLOSS|STOP)\s*"
-    r"(?:IS|TO|AT|@|:|=|REVISED\s+TO|MOVED\s+TO|TRAILED\s+TO|SHIFTED\s+TO|MODIFIED\s+TO)?\s*" + _NUM
+    r"\b(?:MSL|TSL|RSL|NSL|CSL|SL|S\s*/\s*L|STOP\s*-?\s*LOSS|STOPLOSS|STOP)\s*"
+    r"(?:IS|TO|AT|@|:|=|REVISED\s+TO|MOVED\s+TO|TRAILED\s+TO|SHIFTED\s+TO|MODIFIED\s+TO)?\s*" + _NUM,
+    re.IGNORECASE,
 )
 _SL_TO_COST_RE = re.compile(
-    r"\b(?:SL|S\s*/\s*L|STOP\s*-?\s*LOSS|STOPLOSS|STOP)\s*"
+    r"\b(?:MSL|TSL|RSL|NSL|CSL|SL|S\s*/\s*L|STOP\s*-?\s*LOSS|STOPLOSS|STOP)\s*"
     r"(?:IS|TO|AT|@|:|=|REVISED\s+TO|MOVED\s+TO|TRAILED\s+TO|SHIFTED\s+TO|MODIFIED\s+TO)?\s*"
-    r"(?:COST|ENTRY|BREAK\s*-?\s*EVEN|BE|NO\s*LOSS)\b"
+    r"(?:COST|ENTRY|BREAK\s*-?\s*EVEN|BE|NO\s*LOSS)\b|"
+    r"\bCSL\b",
+    re.IGNORECASE,
 )
 _TARGET_RE = re.compile(r"\b(?:TGT|TARGETS?|TP|T1)\s*(?:IS|TO|AT|@|:|=)?\s*" + _NUM)
 # Slash-separated multi-target list: "Tgt 78/95/115/140" or "T1 78 T2 95 T3 115"
@@ -596,9 +599,11 @@ def parse(text: str) -> ParsedSignal:
 #: conversation; sending every line of it to a model is money spent to be told
 #: "not a signal" several hundred times a day.
 _LLM_WORTH_TRYING_RE = re.compile(
-    r"\b(?:BUY|SELL|LONG|SHORT|CE|PE|CALL|PUT|FUT|SL|STOP|TGT|TARGET|EXIT|BOOK|"
-    r"TRAIL|SQUARE|ENTRY|CMP|LOT|LOTS|CLOSE|POSITION|HOLD|ADD|TRIM|HEDGE)\b"
+    r"\b(?:BUY|SELL|LONG|SHORT|CE|PE|CALL|PUT|FUT|SL|MSL|TSL|RSL|STOP|TGT|TARGET|EXIT|BOOK|"
+    r"TRAIL|SQUARE|ENTRY|CMP|LOT|LOTS|CLOSE|POSITION|HOLD|ADD|TRIM|HEDGE|CANCEL|ABORT|IGNORE)\b",
+    re.IGNORECASE,
 )
+
 
 
 def worth_llm_attempt(text: str, parsed: ParsedSignal) -> bool:
