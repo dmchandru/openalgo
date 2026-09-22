@@ -145,3 +145,11 @@ def test_a_group_can_be_configured_before_it_has_ever_been_seen():
     assert saved["lots"] == 2
     assert saved["max_lots"] >= 2
     assert saved["execution_mode"] == "analyze"
+
+
+def test_init_db_auto_migrates_missing_columns():
+    """If a table existed from an older release, init_db ensures added columns exist."""
+    from sqlalchemy import inspect
+    cols = {col["name"] for col in inspect(db.engine).get_columns("wa_signal_group")}
+    for _, col_name, _ in db.ADDED_COLUMNS:
+        assert col_name in cols

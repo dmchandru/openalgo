@@ -283,9 +283,41 @@ class WaSignalAiSuggestion(Base):
     resolved_at = Column(DateTime, nullable=True)
 
 
+#: Columns added across releases that need to be migrated for existing tables.
+ADDED_COLUMNS: list[tuple[str, str, str]] = [
+    # v2 — configurable order parameters & AI management
+    ("wa_signal_group", "order_type", "VARCHAR(10) NOT NULL DEFAULT 'MARKET'"),
+    ("wa_signal_group", "limit_price_offset_pct", "FLOAT"),
+    ("wa_signal_group", "order_profile_id", "INTEGER"),
+    ("wa_signal_group", "auto_apply_ai", "BOOLEAN NOT NULL DEFAULT 0"),
+    # v3 — AI parser mode & above-price tick offset
+    ("wa_signal_group", "ai_parser_mode", "BOOLEAN NOT NULL DEFAULT 0"),
+    ("wa_signal_group", "above_tick_offset", "FLOAT NOT NULL DEFAULT 0.5"),
+]
+
+
+def _apply_migrations() -> None:
+    """Ensure any newly added columns exist in existing tables."""
+    try:
+        from sqlalchemy import inspect, text
+
+        inspector = inspect(engine)
+        tables = set(inspector.get_table_names())
+        for table, column, ddl in ADDED_COLUMNS:
+            if table in tables:
+                cols = {c["name"] for c in inspector.get_columns(table)}
+                if column not in cols:
+                    with engine.begin() as conn:
+                        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+                    logger.info("Migrated %s: added column %s", table, column)
+    except Exception:
+        logger.exception("Failed to auto-apply whatsapp_signals migrations")
+
+
 def init_db() -> None:
-    """Create the add-on's tables if they are absent. Idempotent."""
+    """Create the add-on's tables if they are absent, and apply schema updates. Idempotent."""
     Base.metadata.create_all(bind=engine)
+    _apply_migrations()
     logger.info("WhatsApp signals tables ready")
 
 

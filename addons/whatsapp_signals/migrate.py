@@ -44,18 +44,8 @@ _TABLES = (
 )
 
 #: Columns added after the first release, as (table, column, DDL type clause).
-#: Append here when the model gains a field; never rewrite an existing entry.
-#: The DDL clause is what follows the column name in SQLite ALTER TABLE syntax.
-_ADDED_COLUMNS: list[tuple[str, str, str]] = [
-    # v2 — configurable order parameters & AI management
-    ("wa_signal_group", "order_type", "VARCHAR(10) NOT NULL DEFAULT 'MARKET'"),
-    ("wa_signal_group", "limit_price_offset_pct", "FLOAT"),
-    ("wa_signal_group", "order_profile_id", "INTEGER"),
-    ("wa_signal_group", "auto_apply_ai", "BOOLEAN NOT NULL DEFAULT 0"),
-    # v3 — AI parser mode & above-price tick offset
-    ("wa_signal_group", "ai_parser_mode", "BOOLEAN NOT NULL DEFAULT 0"),
-    ("wa_signal_group", "above_tick_offset", "FLOAT NOT NULL DEFAULT 0.5"),
-]
+#: Sourced from db.ADDED_COLUMNS so runtime init_db and CLI migration share one definition.
+_ADDED_COLUMNS: list[tuple[str, str, str]] = db.ADDED_COLUMNS
 
 
 def _existing_tables() -> set[str]:
