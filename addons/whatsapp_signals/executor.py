@@ -45,6 +45,7 @@ from typing import Any
 
 from addons.whatsapp_signals import db, resolver
 from addons.whatsapp_signals.parser import (
+    CANCEL,
     ENTRY,
     EXIT,
     PARTIAL_EXIT,
@@ -432,6 +433,8 @@ def execute(signal: ParsedSignal, group: dict[str, Any], chat_jid: str) -> Outco
             return _exit(signal, group, chat_jid, mode, api_key, fraction=None)
         if signal.action == PARTIAL_EXIT:
             return _exit(signal, group, chat_jid, mode, api_key, fraction=signal.fraction or 0.5)
+        if signal.action == CANCEL:
+            return _cancel(signal, group, chat_jid, mode, api_key)
         return Outcome("ignored", "Nothing to do.")
     except Exception:
         logger.exception("WhatsApp signal execution crashed")
@@ -920,6 +923,113 @@ def _adjust(signal: ParsedSignal, group: dict[str, Any], chat_jid: str, mode: st
     return Outcome("executed", detail, position_id=position["id"])
 
 
+def _cancel_pending_orders(
+    api_key: str, symbol: str | None = None, strategy: str = STRATEGY_TAG
+) -> list[str]:
+    """Cancel any pending/untriggered orders for a symbol or strategy."""
+    from services.cancel_order_service import cancel_order
+    from services.orderbook_service import get_orderbook
+
+    cancelled = []
+    try:
+        ok, resp, _code = get_orderbook(api_key=api_key)
+        if not ok or not isinstance(resp, dict):
+            return cancelled
+        orders = (resp.get("data") or {}).get("orders") or []
+        pending_statuses = {
+            "open",
+            "pending",
+            "trigger pending",
+            "trigger_pending",
+            "validation_pending",
+            "put order req received",
+            "modify validation pending",
+            "modify req received",
+        }
+        for o in orders:
+            status = str(o.get("order_status") or o.get("status") or "").lower()
+            if status not in pending_statuses:
+                continue
+            order_symbol = o.get("symbol")
+            if symbol and order_symbol != symbol:
+                continue
+            if not symbol and o.get("strategy") != strategy:
+                continue
+
+            order_id = str(o.get("orderid") or "")
+            if order_id:
+                c_ok, _, _ = cancel_order(orderid=order_id, api_key=api_key)
+                if c_ok:
+                    cancelled.append(order_id)
+                    logger.info("Cancelled untriggered pending order %s for %s", order_id, order_symbol)
+    except Exception as e:
+        logger.exception("Error cancelling pending orders: %s", e)
+    return cancelled
+
+
+def _cancel(
+    signal: ParsedSignal,
+    group: dict[str, Any],
+    chat_jid: str,
+    mode: str,
+    api_key: str,
+) -> Outcome:
+    """Cancel an untriggered call: cancel pending orders and clear untriggered position records."""
+    target_symbol = None
+    if signal.names_leg:
+        instrument, _ = resolver.resolve(signal, group.get("product") or "MIS")
+        if instrument:
+            target_symbol = instrument.symbol
+
+    # 1. Cancel pending orders in the orderbook
+    cancelled_orders = _cancel_pending_orders(api_key, symbol=target_symbol)
+
+    # 2. Check tracked open positions for this group
+    positions = db.open_positions(chat_jid, mode=mode)
+    if target_symbol:
+        positions = [p for p in positions if p.get("symbol") == target_symbol]
+
+    untriggered_cleared = []
+    exited_active = []
+
+    for pos in positions:
+        sym = pos["symbol"]
+        exch = pos["exchange"]
+        prod = pos["product"]
+        live_qty = _live_net_qty(sym, exch, prod, api_key)
+
+        if live_qty == 0:
+            # Order never filled or was cancelled — clear stop and mark closed
+            _clear_stop(sym, exch, prod, mode)
+            db.update_position(pos["id"], status="closed")
+            untriggered_cleared.append(sym)
+        else:
+            # Order was filled before cancel arrived — exit to protect user
+            res = _exit_one(pos, api_key, mode, fraction=None, signal=signal)
+            if res.status == "executed":
+                exited_active.append(f"{sym} (qty {live_qty})")
+
+    parts = []
+    if cancelled_orders:
+        parts.append(f"Cancelled pending order(s): {', '.join(cancelled_orders)}")
+    if untriggered_cleared:
+        parts.append(f"Cleared untriggered position(s): {', '.join(untriggered_cleared)}")
+    if exited_active:
+        parts.append(f"Exited active position(s): {', '.join(exited_active)}")
+
+    if parts:
+        return Outcome(
+            "executed",
+            "; ".join(parts),
+            order_id=cancelled_orders[0] if cancelled_orders else None,
+        )
+
+    return Outcome(
+        "ignored",
+        "Cancel received: no pending orders or positions found to cancel.",
+    )
+
+
 def _exit(
     signal: ParsedSignal,
     group: dict[str, Any],
@@ -987,6 +1097,10 @@ def _exit_one(
                 f"A {int(fraction * 100)}% exit of {symbol} works out to less than one lot, "
                 "so nothing was sent."
             )
+
+    # On a full exit, cancel any resting untriggered orders for this symbol
+    if fraction is None:
+        _cancel_pending_orders(api_key, symbol=symbol)
 
     from blueprints.scalping import _reducing_exit
 

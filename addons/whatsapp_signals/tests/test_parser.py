@@ -11,7 +11,15 @@ from __future__ import annotations
 import pytest
 
 from addons.whatsapp_signals import parser
-from addons.whatsapp_signals.parser import ENTRY, EXIT, NONE, PARTIAL_EXIT, SET_SL, SET_TARGET
+from addons.whatsapp_signals.parser import (
+    CANCEL,
+    ENTRY,
+    EXIT,
+    NONE,
+    PARTIAL_EXIT,
+    SET_SL,
+    SET_TARGET,
+)
 
 
 @pytest.mark.parametrize(
@@ -42,8 +50,13 @@ from addons.whatsapp_signals.parser import ENTRY, EXIT, NONE, PARTIAL_EXIT, SET_
         ("Square off everything", EXIT),
         ("Book full profit", EXIT),
         ("Book 100%", EXIT),
-        ("Cancel", EXIT),
         ("SL hit", EXIT),
+        # Cancels (untriggered / ignore call).
+        ("Cancel", CANCEL),
+        ("Cancel call", CANCEL),
+        ("Ignore", CANCEL),
+        ("Not triggered", CANCEL),
+        ("Avoid", CANCEL),
         # Partials.
         ("Book half", PARTIAL_EXIT),
         ("Book 50%", PARTIAL_EXIT),

@@ -13,7 +13,7 @@ import types
 import pytest
 
 from addons.whatsapp_signals import db, executor
-from addons.whatsapp_signals.parser import EXIT, PARTIAL_EXIT, ParsedSignal
+from addons.whatsapp_signals.parser import CANCEL, EXIT, PARTIAL_EXIT, ParsedSignal
 
 
 @pytest.fixture
@@ -228,3 +228,38 @@ def test_an_exit_with_nothing_open_is_refused(group, exit_path):
     )
     assert outcome.status == "rejected"
     assert "no open position" in outcome.detail
+
+
+def test_cancel_cancels_pending_orders_and_clears_untriggered_position(group, exit_path, monkeypatch):
+    chat = group["chat_jid"]
+    _position(chat, symbol="NIFTY28OCT2525000CE")
+    # Live net qty is 0 because the order never filled (untriggered)
+    monkeypatch.setattr(executor, "_live_net_qty", _held(0))
+    monkeypatch.setattr(executor, "_cancel_pending_orders", lambda *a, **k: ["ORD_PENDING_1"])
+
+    signal = ParsedSignal(action=CANCEL, raw="Cancel")
+    outcome = executor._cancel(signal, group, chat, "analyze", "k")
+
+    assert outcome.status == "executed"
+    assert "ORD_PENDING_1" in outcome.detail
+    assert "Cleared untriggered" in outcome.detail
+    # No exit order was sent because position was never filled
+    assert exit_path["sent"] == []
+    # Untriggered position is marked closed
+    assert db.open_positions(chat, mode="analyze") == []
+
+
+def test_cancel_exits_active_position_if_already_filled(group, exit_path, monkeypatch):
+    chat = group["chat_jid"]
+    _position(chat, symbol="NIFTY28OCT2525000CE")
+    # Live net qty is 150 because it filled
+    monkeypatch.setattr(executor, "_live_net_qty", _held(150))
+    monkeypatch.setattr(executor, "_cancel_pending_orders", lambda *a, **k: [])
+
+    signal = ParsedSignal(action=CANCEL, raw="Cancel")
+    outcome = executor._cancel(signal, group, chat, "analyze", "k")
+
+    assert outcome.status == "executed"
+    assert "Exited active" in outcome.detail
+    assert len(exit_path["sent"]) == 1
+    assert exit_path["sent"][0]["symbol"] == "NIFTY28OCT2525000CE"

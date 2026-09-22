@@ -281,4 +281,7 @@ def test_sl_hit_and_cancel_triggers_exit():
     assert sig2.action == parser.EXIT
 
     sig3 = parser.parse("Cancel")
-    assert sig3.action == parser.EXIT
+    assert sig3.action == parser.CANCEL
+
+    sig4 = parser.parse("Ignore call")
+    assert sig4.action == parser.CANCEL

@@ -45,9 +45,10 @@ EXIT = "exit"
 PARTIAL_EXIT = "partial_exit"
 SET_SL = "set_sl"
 SET_TARGET = "set_target"
+CANCEL = "cancel"
 NONE = "none"
 
-ACTIONS = (ENTRY, EXIT, PARTIAL_EXIT, SET_SL, SET_TARGET, NONE)
+ACTIONS = (ENTRY, EXIT, PARTIAL_EXIT, SET_SL, SET_TARGET, CANCEL, NONE)
 
 _NUM = r"(\d+(?:\.\d+)?)"
 
@@ -88,12 +89,17 @@ _SELL_RE = re.compile(r"\b(?:SELL|SELLING|SHORT|GO\s+SHORT|WRITE)\b")
 
 _EXIT_RE = re.compile(
     r"\b(?:EXIT|SQUARE\s*-?\s*OFF|SQUAREOFF|SQ\s*OFF|CLOSE\s+(?:ALL|POSITION|IT)|"
-    r"BOOK\s+(?:FULL|ALL|OUT|COMPLETE)|GET\s+OUT|CUT\s+(?:IT|ALL)|"
-    r"CANCEL\s*(?:CALL|TRADE|SIGNAL|POSITION|ORDER)?|ABORT\s*(?:CALL|TRADE|SIGNAL)?|"
-    r"IGNORE\s*(?:CALL|SIGNAL)?)\b"
+    r"BOOK\s+(?:FULL|ALL|OUT|COMPLETE)|GET\s+OUT|CUT\s+(?:IT|ALL))\b"
 )
-# Bare "Cancel" / "Abort" / "Ignore" with no following noun also exits.
-_CANCEL_RE = re.compile(r"^\s*(?:CANCEL|ABORT|IGNORE)\s*$", re.IGNORECASE)
+# "Cancel" / "Abort" / "Ignore" / "Avoid" / "Not triggered"
+_CANCEL_RE = re.compile(
+    r"^\s*(?:PLEASE\s+)?(?:CANCEL|ABORT|IGNORE|AVOID)"
+    r"(?:\s+(?:CALL|TRADE|SIGNAL|ORDER|THIS|IT))?\s*$|"
+    r"\b(?:NOT\s+TRIGGERED|NOT\s+ACTIVATED)\b|"
+    r"\b(?:CANCEL|IGNORE|AVOID)\s+(?:IF\s+NOT\s+ACTIVE|IF\s+NOT\s+TRIGGERED)\b|"
+    r"\b(?:CANCEL|IGNORE|AVOID)\s+(?:CALL|TRADE|SIGNAL|ORDER)\b",
+    re.IGNORECASE,
+)
 # No trailing \b after the percent branch: "%" is not a word character, so a
 # boundary there would demand a letter after it and "book 50%" -- which is how
 # the instruction is actually written -- would not match.
@@ -413,23 +419,31 @@ def parse(text: str) -> ParsedSignal:
     if _ACTIVE_RE.match(norm):
         return ParsedSignal(informational=True, note="active confirmation, already entered", raw=raw)
 
-    # "Cancel" / "Abort" / "Ignore" alone means the provider is calling off the trade.
-    # Exit any open position for this instrument immediately.
-    if _CANCEL_RE.match(raw):
-        return ParsedSignal(action=EXIT, note="call cancelled by provider", raw=raw)
+    leg = _extract_leg(norm)
+    has_buy = bool(_BUY_RE.search(norm))
+    has_sell = bool(_SELL_RE.search(norm))
+    is_report = bool(_REPORT_RE.search(norm))
+    is_chatter = bool(_CHATTER_RE.search(norm))
+
+    common = {
+        "raw": raw,
+        "base": leg["base"],
+        "strike": leg["strike"],
+        "option_type": leg["option_type"],
+        "expiry": leg["expiry"],
+        "is_futures": leg["is_futures"],
+    }
+
+    # "Cancel" / "Abort" / "Ignore" / "Not triggered" — cancel untriggered call & pending orders.
+    if _CANCEL_RE.search(norm):
+        return ParsedSignal(action=CANCEL, note="call cancelled / not triggered", **common)
 
     # "SL hit" / "Stop hit" / "SL triggered" — provider reporting that the stop fired.
     # Exit any still-open position so the DB stays in sync even when the risk
     # monitor missed the tick (e.g. sandbox during off-hours). The executor checks
     # live qty before sending any order, so a double-exit is a safe no-op.
     if _SL_HIT_RE.search(norm):
-        return ParsedSignal(action=EXIT, note="SL hit — closing any open position", raw=raw)
-
-    leg = _extract_leg(norm)
-    has_buy = bool(_BUY_RE.search(norm))
-    has_sell = bool(_SELL_RE.search(norm))
-    is_report = bool(_REPORT_RE.search(norm))
-    is_chatter = bool(_CHATTER_RE.search(norm))
+        return ParsedSignal(action=EXIT, note="SL hit — closing any open position", **common)
 
     sl_value = _first_float(_SL_RE.search(norm))
     sl_to_cost = bool(_SL_TO_COST_RE.search(norm))
