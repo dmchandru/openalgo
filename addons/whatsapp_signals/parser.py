@@ -117,7 +117,7 @@ _BOOK_PROFIT_RE = re.compile(
     r"\bBOOK\s+(?:PARTIAL\s*/\s*FULL|PARTIAL\s+OR\s+FULL)\b"
 )
 
-_TRAIL_RE = re.compile(r"\b(?:TRAIL(?:ING)?|TSL)\b", re.IGNORECASE)
+_TRAIL_RE = re.compile(r"\b(?:TRAIL(?:ING)?|TSL|MSL)\b", re.IGNORECASE)
 
 # --- levels ----------------------------------------------------------------
 
@@ -133,10 +133,10 @@ _SL_TO_COST_RE = re.compile(
     r"\bCSL\b",
     re.IGNORECASE,
 )
-_TARGET_RE = re.compile(r"\b(?:TGT|TARGETS?|TP|T1)\s*(?:IS|TO|AT|@|:|=)?\s*" + _NUM)
-# Slash-separated multi-target list: "Tgt 78/95/115/140" or "T1 78 T2 95 T3 115"
+_TARGET_RE = re.compile(r"\b(?:TGT|TARGETS?|TP|T1)\s*(?:IS|TO|AT|@|:|=|/)?\s*" + _NUM)
+# Slash-separated multi-target list: "Tgt 78/95/115/140", "Tgt /125/150/170", or "T1 78 T2 95 T3 115"
 _MULTI_TARGET_RE = re.compile(
-    r"\b(?:TGT|TARGETS?|TP)\s*[:\s\-]?\s*"
+    r"\b(?:TGT|TARGETS?|TP)\s*[:\s\-/=@]*\s*"
     r"(\d+(?:\.\d+)?)"                        # T1 (mandatory)
     r"(?:\s*[/,]\s*(\d+(?:\.\d+)?))?"        # T2 (optional)
     r"(?:\s*[/,]\s*(\d+(?:\.\d+)?))?"        # T3
@@ -373,8 +373,8 @@ def _extract_targets(norm: str) -> tuple[float, ...]:
         except (ValueError, TypeError):
             pass
 
-    # 2. Pattern like "TGT: 78/95/115/140" or "TGT 78, 95, 115, 140" or "TARGETS 78 95 115"
-    m = re.search(r"\b(?:TGT|TARGETS?|TP)\s*[:\-=@]?\s*(\d+(?:\.\d+)?(?:[\s/,]+(?:\d+(?:\.\d+)?))+)", norm)
+    # 2. Pattern like "TGT: 78/95/115/140" or "TGT /125/150/170" or "TARGETS 78 95 115"
+    m = re.search(r"\b(?:TGT|TARGETS?|TP)\s*[:\-/=@]*\s*(\d+(?:\.\d+)?(?:[\s/,]+(?:\d+(?:\.\d+)?))+)", norm)
     if m:
         nums = re.findall(r"\b(\d+(?:\.\d+)?)\b", m.group(1))
         if len(nums) > 1:

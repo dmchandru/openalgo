@@ -453,3 +453,18 @@ def test_averaged_entry_arithmetic():
     # Nothing known to average against, or nothing to average with.
     assert executor._averaged_entry({"quantity": 0, "entry_price": None}, 75, 100.0) == 100.0
     assert executor._averaged_entry({"quantity": 75, "entry_price": 120.0}, 75, None) == 120.0
+
+
+def test_re_entry_allowed_if_broker_position_is_flat(group, order_path, monkeypatch):
+    """If a position is marked open in DB but broker confirms net qty is 0,
+    the stale DB position is auto-reconciled and the new entry is allowed."""
+    executor._enter(_entry(stop_loss=100.0), group, group["chat_jid"], "analyze", "k")
+    assert len(db.open_positions(group["chat_jid"], mode="analyze")) == 1
+
+    # Simulate broker positionbook returning 0 (flat position)
+    monkeypatch.setattr(executor, "_live_net_qty", lambda *a, **k: 0)
+    monkeypatch.setattr(executor, "_last_price", lambda *a, **k: 110.0)
+
+    outcome = executor._enter(_entry(stop_loss=105.0), group, group["chat_jid"], "analyze", "k")
+    assert outcome.status == "executed"
+    assert len(order_path["placed"]) == 2

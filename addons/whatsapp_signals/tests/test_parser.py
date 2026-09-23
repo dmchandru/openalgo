@@ -169,3 +169,17 @@ def test_the_model_is_only_asked_when_it_could_help(message, worth):
 
 def test_normalize_flattens_decoration_and_newlines():
     assert parser.normalize("*BUY*\n_NIFTY_  25000 CE") == "BUY NIFTY 25000 CE"
+
+
+def test_msl_enables_trailing_stop():
+    sig = parser.parse("MSL 107")
+    assert sig.action == SET_SL
+    assert sig.stop_loss == 107.0
+    assert sig.trail is True
+
+
+def test_targets_with_leading_slash():
+    sig = parser.parse("Tgt /125/150/170")
+    assert sig.action == SET_TARGET
+    assert sig.target == 125.0
+    assert sig.targets == (125.0, 150.0, 170.0)

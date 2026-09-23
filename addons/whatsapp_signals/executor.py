@@ -182,17 +182,22 @@ def _last_price(symbol: str, exchange: str, api_key: str) -> float | None:
     return ltp if ltp > 0 else None
 
 
-def _live_net_qty(symbol: str, exchange: str, product: str, api_key: str) -> int:
-    """Net quantity the broker (or sandbox) says is held on this leg."""
+def _live_net_qty(symbol: str, exchange: str, product: str, api_key: str) -> int | None:
+    """Net quantity the broker (or sandbox) says is held on this leg.
+
+    Returns None if the position book could not be fetched (network error,
+    broker offline, unauthenticated). Returns 0 when the book was fetched
+    successfully and confirms no position is held.
+    """
     from services.positionbook_service import get_positionbook
 
     try:
         ok, resp, _code = get_positionbook(api_key=api_key)
     except Exception:
         logger.exception("Position book fetch failed")
-        return 0
+        return None
     if not ok or not isinstance(resp, dict):
-        return 0
+        return None
     for row in resp.get("data") or []:
         if (
             row.get("symbol") == symbol
@@ -382,21 +387,22 @@ def match_position(
     if not positions:
         return None, "There is no open position from this group to apply that to."
 
-    # If the group has multiple open positions on record, verify against live net qty:
-    # positions that were closed at the broker (by risk monitor, square-off, or manual)
-    # are reconciled and marked closed so stale records don't block follow-ups.
-    if api_key and len(positions) > 1:
+    # Verify against live net qty: positions that were closed at the broker
+    # (by risk monitor, square-off, or manual) are reconciled and marked closed
+    # so stale records don't block follow-ups or misdirect stops.
+    if api_key and positions:
         try:
             truly_open = []
             for p in positions:
                 live = _live_net_qty(p["symbol"], p["exchange"], p["product"], api_key)
-                if live == 0:
+                if live is not None and live == 0:
                     _clear_stop(p["symbol"], p["exchange"], p["product"], mode)
                     db.update_position(p["id"], status="closed")
                 else:
                     truly_open.append(p)
-            if truly_open:
-                positions = truly_open
+            positions = truly_open
+            if not positions:
+                return None, "There is no open position from this group to apply that to."
         except Exception:
             logger.debug("Live position reconciliation skipped", exc_info=True)
 
@@ -611,7 +617,7 @@ def _enter(
     if instrument is None:
         return _rejected(error or "That instrument could not be identified.")
 
-    existing = _find_open(chat_jid, instrument, mode)
+    existing = _find_open(chat_jid, instrument, mode, api_key=api_key)
     side = (signal.side or "BUY").upper()
 
     # A signal on the opposite side of a leg the group already holds is not an
@@ -865,7 +871,10 @@ def _averaged_entry(
 
 
 def _find_open(
-    chat_jid: str, instrument: resolver.ResolvedInstrument, mode: str
+    chat_jid: str,
+    instrument: resolver.ResolvedInstrument,
+    mode: str,
+    api_key: str | None = None,
 ) -> dict[str, Any] | None:
     for position in db.open_positions(chat_jid, mode=mode):
         if (
@@ -873,6 +882,22 @@ def _find_open(
             and position["exchange"] == instrument.exchange
             and position["product"] == instrument.product
         ):
+            if api_key:
+                try:
+                    live = _live_net_qty(
+                        position["symbol"], position["exchange"], position["product"], api_key
+                    )
+                    if live is not None and live == 0:
+                        logger.info(
+                            "Auto-reconciling flat position for %s (id=%s, marked open in DB but live qty is 0)",
+                            position["symbol"],
+                            position["id"],
+                        )
+                        _clear_stop(position["symbol"], position["exchange"], position["product"], mode)
+                        db.update_position(position["id"], status="closed")
+                        continue
+                except Exception:
+                    logger.debug("Live position reconciliation skipped during _find_open", exc_info=True)
             return position
     return None
 
@@ -920,6 +945,15 @@ def _adjust(
         expiry=None,
         kind="option",
     )
+    is_trailing = bool(signal.trail or group.get("trailing_enabled"))
+    trailing_step = group.get("trailing_step")
+    if is_trailing and (trailing_step is None or trailing_step <= 0):
+        entry_p = position.get("entry_price")
+        if entry_p and stop_loss and abs(entry_p - stop_loss) >= 0.5:
+            trailing_step = round(abs(entry_p - stop_loss), 2)
+        else:
+            trailing_step = 1.0
+
     written = _write_stop(
         instrument,
         mode=mode,
@@ -928,8 +962,8 @@ def _adjust(
         entry_price=position.get("entry_price"),
         stop_loss=stop_loss,
         target=target,
-        trailing_enabled=bool(signal.trail or group.get("trailing_enabled")),
-        trailing_step=group.get("trailing_step"),
+        trailing_enabled=is_trailing,
+        trailing_step=trailing_step,
     )
     if not written:
         return _failed(
