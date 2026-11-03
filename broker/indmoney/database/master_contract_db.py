@@ -178,10 +178,11 @@ def download_csv_indmoney_data(output_path):
 
     if not auth_token:
         logger.error("No authentication token available for Indmoney broker")
-        return
+        return ["no authentication token"]
 
     # Indmoney API endpoints for different segments
     segments = ["equity", "fno", "index"]
+    failures = []
     headers = {"Authorization": auth_token}
 
     # Download CSV files for each segment
@@ -217,8 +218,12 @@ def download_csv_indmoney_data(output_path):
                 logger.error(
                     f"Failed to download {segment} from {url}. Status code: {response.status_code}"
                 )
+                failures.append(f"{segment}: HTTP {response.status_code}")
         except Exception as e:
             logger.error(f"Error downloading {segment} instruments: {e}")
+            failures.append(f"{segment}: {e}")
+
+    return failures
 
 
 def reformat_symbol(row, file_segment=None):
@@ -541,11 +546,19 @@ def master_contract_download():
         os.makedirs(output_path)
 
     try:
-        download_csv_indmoney_data(output_path)
-        delete_symtoken_table()
+        # Replace the table only with a complete download. Deleting first left an instance whose token had expired
+        # with no symbols at all (every segment 403): no quotes, option chain or feed until a later download worked.
+        failures = download_csv_indmoney_data(output_path)
+        if failures:
+            error_msg = f"Master contract download failed, keeping the existing symbols: {'; '.join(failures)}"
+            logger.error(error_msg)
+            update_status("indmoney", "error", error_msg)
+            return socketio.emit("master_contract_download", {"status": "error", "message": error_msg})
+
         token_df = process_indmoney_csv(output_path)
 
         if not token_df.empty:
+            delete_symtoken_table()
             copy_from_dataframe(token_df, broker="indmoney")
             delete_indmoney_temp_data(output_path)
             success_msg = "Successfully Downloaded Indmoney Instruments"

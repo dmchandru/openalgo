@@ -27,6 +27,23 @@ DEFAULT_MARGIN_RESPONSE = {
 _CASH_BALANCE_KEYS = ("eq_cnc", "eq_mis", "eq_mtf")
 
 
+def test_auth_token(auth_token):
+    """Session-resume check: is the stored token still accepted by INDstocks?
+
+    get_margin_data cannot answer this - on a 401 it returns
+    DEFAULT_MARGIN_RESPONSE, which looks like a valid (empty) account, so a
+    token past its 24 hours was resumed the next morning and the master
+    contract download then failed with 403 on every segment. Only a rejection
+    (401/403) fails the check; an outage is not evidence against the token.
+    """
+    from broker.indmoney.api.auth_api import validate_access_token
+
+    is_valid, reason = validate_access_token(auth_token)
+    if is_valid is False:
+        return False, reason
+    return True, None
+
+
 def _as_float(value, default=0.0):
     """Coerce a broker numeric to float, tolerating strings, None, and blanks."""
     if value is None:

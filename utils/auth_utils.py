@@ -16,6 +16,7 @@ from database.master_contract_status_db import (
     get_exchange_stats_from_db,
     get_last_download_time,
     get_last_downloaded_broker,
+    get_status,
     init_broker_status,
     mark_status_ready_without_download,
     update_download_stats,
@@ -443,19 +444,24 @@ def _download_master_contract(broker):
         except Exception:
             total_symbols = None
 
-        # Since socketio.emit doesn't return a meaningful value, we check if no exception was raised
-        update_status(
-            broker, "success", "Master contract download completed successfully", total_symbols
-        )
-        logger.info(f"Master contract download completed for {broker}")
+        # Since socketio.emit doesn't return a meaningful value, a broker reports a failure it handled itself by
+        # setting the status to "error". Keep that status and record no download, so the next login retries
+        # instead of skipping as "already downloaded today" with a table the failure left behind.
+        if get_status(broker).get("status") == "error":
+            logger.error(f"Master contract download for {broker} failed; not recorded as a download")
+        else:
+            update_status(
+                broker, "success", "Master contract download completed successfully", total_symbols
+            )
+            logger.info(f"Master contract download completed for {broker}")
 
-        # Calculate download duration and get exchange stats
-        duration_seconds = int(time.time() - start_time)
-        exchange_stats = get_exchange_stats_from_db()
+            # Calculate download duration and get exchange stats
+            duration_seconds = int(time.time() - start_time)
+            exchange_stats = get_exchange_stats_from_db()
 
-        # Update download statistics for smart download tracking
-        update_download_stats(broker, duration_seconds, exchange_stats)
-        logger.info(f"Download stats recorded: {duration_seconds}s, exchanges: {list(exchange_stats.keys())}")
+            # Update download statistics for smart download tracking
+            update_download_stats(broker, duration_seconds, exchange_stats)
+            logger.info(f"Download stats recorded: {duration_seconds}s, exchanges: {list(exchange_stats.keys())}")
 
         # Load symbols into memory cache after successful download
         try:
